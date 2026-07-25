@@ -172,6 +172,37 @@ Thrash is a `warn`, not a block — a looping agent is a prompt or planning prob
 not a misbehaving server, so Kams reports it rather than intervening. Retry storms
 throttle rather than block, because the dependency may recover.
 
+### The LLM judge — enrichment, never a decision
+
+Deterministic heuristics decide severity and action. `kamsd` then asks Claude
+Sonnet 4.6 to *explain* the finding, off the request path, minutes later:
+
+```
+[CRITICAL] integrity.definition_drift: description changed on a pinned baseline
+           (model_directed_imperative, instruction_block, rewrite_magnitude)
+
+judge: malicious — The updated description instructs the agent to secretly read
+       the user's private SSH key and embed it in the note content, effectively
+       exfiltrating credentials.
+```
+
+The severity was already decided before the judge ran. Two properties are
+structural rather than conventional:
+
+- **It cannot change a verdict.** `assess()` returns a `Verdict` type carrying
+  only text and a model id — there is no field for severity or action and no code
+  path to one. A test asserts `Severity.parse("malicious")` raises.
+- **It never sees user data.** The payload is allowlisted to the two tool
+  descriptions. Arguments and results — the things carrying credentials and PII —
+  are unreachable, and a test asserts they stay out of the prompt even when
+  present on the finding.
+
+Delivery is fire-and-forget from the shim to `kamsd` over a bounded queue that
+drops rather than blocks. Losing enrichment costs a prose explanation; blocking an
+agent to obtain one would be a far worse trade. Enrichment spans are **linked** to
+the originating trace rather than parented to it, since they occur minutes later
+in a different process.
+
 ### Threat model — documented, not invented
 
 | Attack | Detector |
@@ -201,7 +232,7 @@ HTTP widens that guarantee to status codes and headers, since an HTTP client obs
 Messages carry their original bytes and are forwarded unmodified unless a hook explicitly rewrites them. Parsing is for observation only. Re-serialising everything would silently reorder keys and change unicode escaping — invisible when diffing parsed objects, very visible to anything hashing the wire.
 
 ```bash
-uv run pytest        # 164 tests
+uv run pytest        # 182 tests
 ```
 
 The false-positive suite is the load-bearing half. Ordinary tool prose containing "you must", "do not", URLs, and imperatives must stay quiet — and does.
@@ -240,7 +271,6 @@ tests/golden/          byte-transparency guarantees
 Known limits, stated plainly:
 
 - Enforcement applies to calls issued *after* a finding is processed. MCP permits pipelining, so a burst issued before the `tools/list` response is handled can slip through within a single connection. Standing state in `kamsd` closes this across connections, but not within one.
-- The LLM judge described in `architecture.md` §3.2 is designed but not implemented. By design it only ever annotates, so nothing about enforcement depends on it.
 - Context cost is an **estimate** until an instrumented agent reports a measured token delta. Every emission carries `mcp.context.cost.estimated` so the two are never confused, and the estimator calibrates per server once ground truth arrives.
 - The webhook trusts its network position. It has no signature verification, which is fine for a loopback deployment and would not be for an exposed one.
 

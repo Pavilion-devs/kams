@@ -90,8 +90,12 @@ def is_firing(payload: dict[str, Any]) -> bool:
 class _Handler(BaseHTTPRequestHandler):
     state: SharedState
     ttl: float
+    enricher: Any = None
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
+        if self.path.rstrip("/").endswith("/findings"):
+            self._handle_finding()
+            return
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b"{}"
         try:
@@ -138,6 +142,39 @@ class _Handler(BaseHTTPRequestHandler):
         log.warning("quarantined %s via %s (ttl %ds)", server, rule, int(self.ttl))
         self._reply(200, {"status": "quarantined", "server": server, "rule": rule})
 
+    def _handle_finding(self) -> None:
+        """Accept a finding from a shim for asynchronous enrichment.
+
+        Always 202: the shim must not care whether enrichment succeeded, and
+        must never wait on it.
+        """
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b"{}"
+        if self.enricher is None:
+            self._reply(202, {"status": "ignored", "reason": "enrichment disabled"})
+            return
+        try:
+            payload = json.loads(raw or b"{}")
+        except json.JSONDecodeError:
+            self._reply(400, {"error": "invalid json"})
+            return
+
+        from kams.daemon.enrich import EnrichmentJob
+
+        self.enricher.submit(
+            EnrichmentJob(
+                server=str(payload.get("server", "unknown")),
+                tool=payload.get("tool"),
+                detector=str(payload.get("detector", "unknown")),
+                severity=str(payload.get("severity", "INFO")),
+                summary=str(payload.get("summary", "")),
+                evidence=payload.get("evidence") or {},
+                trace_id=payload.get("trace_id"),
+                span_id=payload.get("span_id"),
+            )
+        )
+        self._reply(202, {"status": "queued"})
+
     def do_GET(self) -> None:  # noqa: N802
         self._reply(200, {
             "status": "ok",
@@ -175,8 +212,9 @@ def _reason(payload: dict[str, Any]) -> str:
     return "SigNoz alert fired"
 
 
-def serve(state: SharedState, *, port: int = DEFAULT_PORT, ttl: float = DEFAULT_TTL) -> ThreadingHTTPServer:
-    handler = type("KamsWebhookHandler", (_Handler,), {"state": state, "ttl": ttl})
+def serve(state: SharedState, *, port: int = DEFAULT_PORT, ttl: float = DEFAULT_TTL,
+          enricher: Any = None) -> ThreadingHTTPServer:
+    handler = type("KamsWebhookHandler", (_Handler,), {"state": state, "ttl": ttl, "enricher": enricher})
     server = ThreadingHTTPServer(("0.0.0.0", port), handler)
     threading.Thread(target=server.serve_forever, daemon=True, name="kams-webhook").start()
     log.info("webhook listening on :%d", port)

@@ -61,6 +61,7 @@ class Interceptor:
         egress: Any | None = None,
         cost: Any | None = None,
         behavioural: Any | None = None,
+        forwarder: Any | None = None,
         transport: str = "stdio",
     ) -> None:
         self.server_name = server_name
@@ -70,6 +71,7 @@ class Interceptor:
         self.egress = egress
         self.cost = cost
         self.behavioural = behavioural
+        self.forwarder = forwarder
         # Set by whichever adapter constructed us. Hardcoding this meant
         # HTTP traffic was reported as stdio, which is worse than omitting
         # the attribute entirely.
@@ -173,6 +175,15 @@ class Interceptor:
                     for cls in f.evidence.get("classes") or []:
                         self._c_egress.add(1, {"server": f.server, "class": cls,
                                                **({"tool": f.tool} if f.tool else {})})
+                # Hand integrity findings to kamsd for LLM enrichment. Fire
+                # and forget: the judge must never be in the request path.
+                if self.forwarder is not None and f.kind.value.startswith("INTEGRITY"):
+                    ctx = span.get_span_context()
+                    self.forwarder.submit(
+                        f,
+                        trace_id=format(ctx.trace_id, "032x") if ctx.is_valid else None,
+                        span_id=format(ctx.span_id, "016x") if ctx.is_valid else None,
+                    )
                 log.warning("[%s] %s: %s", f.severity.name, f.detector, f.summary)
             except Exception as exc:  # noqa: BLE001
                 log.debug("failed to emit finding: %r", exc)
@@ -415,6 +426,9 @@ class Interceptor:
             log.debug("could not persist baseline: %r", exc)
 
     def close(self) -> None:
+        if self.forwarder is not None:
+            self.forwarder.stop()
+
         """Close spans whose responses never arrived.
 
         Leaving them open means they are never exported and the calls vanish

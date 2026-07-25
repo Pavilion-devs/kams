@@ -44,6 +44,10 @@ def main(argv: list[str] | None = None) -> int:
     shim.add_argument("--otlp-endpoint", default=None, help="OTLP gRPC endpoint")
     shim.add_argument("--lock", default="kams.lock", help="path to the pinned tool-definition lockfile")
     shim.add_argument("--no-integrity", action="store_true", help="disable the integrity detector")
+    shim.add_argument("--kamsd", default="http://127.0.0.1:8787/findings",
+                       help="kamsd endpoint for async finding enrichment")
+    shim.add_argument("--no-forward", action="store_true",
+                       help="do not send findings to kamsd for enrichment")
     shim.add_argument("--no-behavioural", action="store_true",
                        help="disable thrash / retry-storm / latency detection")
     shim.add_argument("--no-egress", action="store_true", help="disable sensitive-data classification")
@@ -72,6 +76,10 @@ def main(argv: list[str] | None = None) -> int:
     proxy.add_argument("--policy", default="policy.yaml")
     proxy.add_argument("--state", default="kams-state.json")
     proxy.add_argument("--no-integrity", action="store_true")
+    proxy.add_argument("--kamsd", default="http://127.0.0.1:8787/findings",
+                       help="kamsd endpoint for async finding enrichment")
+    proxy.add_argument("--no-forward", action="store_true",
+                       help="do not send findings to kamsd for enrichment")
     proxy.add_argument("--no-behavioural", action="store_true",
                        help="disable thrash / retry-storm / latency detection")
     proxy.add_argument("--no-egress", action="store_true")
@@ -107,6 +115,8 @@ def main(argv: list[str] | None = None) -> int:
     daemon.add_argument("--port", type=int, default=8787)
     daemon.add_argument("--state", default="kams-state.json")
     daemon.add_argument("--ttl", default="1h", help="how long an alert-driven quarantine lasts")
+    daemon.add_argument("--no-judge", action="store_true",
+                        help="disable LLM enrichment of integrity findings")
     daemon.add_argument("--log-level", default=os.environ.get("KAMS_LOG_LEVEL", "info"))
 
     args = parser.parse_args(ours)
@@ -145,10 +155,20 @@ def _run_daemon(args) -> int:
     tracing.setup("kamsd")
     state = SharedState(args.state)
     ttl = parse_duration(args.ttl) or 3600.0
-    serve(state, port=args.port, ttl=ttl)
+
+    enricher = None
+    if not args.no_judge:
+        from kams.daemon.enrich import Enricher
+
+        enricher = Enricher()
+        enricher.start()
+
+    serve(state, port=args.port, ttl=ttl, enricher=enricher)
 
     print(f"kamsd listening on :{args.port}  state={args.state}  ttl={int(ttl)}s")
     print("point a SigNoz webhook notification channel at this endpoint")
+    if enricher is not None:
+        print(f"  judge: {enricher.judge.model} (enrichment only — cannot change a verdict)")
     try:
         while True:
             time.sleep(3600)
@@ -196,7 +216,15 @@ def _build_pipeline(args):
         engine = PolicyEngine(policy, shared=SharedState(args.state))
 
     behavioural = None if getattr(args, "no_behavioural", False) else BehaviouralDetector()
-    return store, integrity, egress, engine, ContextCostEstimator(), behavioural
+
+    forwarder = None
+    if not getattr(args, "no_forward", False):
+        from kams.shim.forward import FindingForwarder
+
+        forwarder = FindingForwarder(args.kamsd)
+        forwarder.start()
+
+    return store, integrity, egress, engine, ContextCostEstimator(), behavioural, forwarder
 
 
 def _name_from_url(url: str) -> str:
@@ -213,10 +241,10 @@ def _run_proxy(args) -> int:
     server_name = args.server or _name_from_url(args.upstream)
     tracing.setup("kams-shim", endpoint=args.otlp_endpoint, extra_resource={"kams.server": server_name})
 
-    store, integrity, egress, engine, cost, behavioural = _build_pipeline(args)
+    store, integrity, egress, engine, cost, behavioural, forwarder = _build_pipeline(args)
     interceptor = Interceptor(
         server_name, integrity=integrity, policy=engine, egress=egress,
-        cost=cost, behavioural=behavioural, transport="http",
+        cost=cost, behavioural=behavioural, forwarder=forwarder, transport="http",
     )
     relay = HttpRelay(
         args.upstream,
@@ -251,11 +279,11 @@ async def _run_shim(args, upstream: list[str]) -> int:
 
     tracing.setup("kams-shim", endpoint=args.otlp_endpoint, extra_resource={"kams.server": server_name})
 
-    store, integrity, egress, engine, cost, behavioural = _build_pipeline(args)
+    store, integrity, egress, engine, cost, behavioural, forwarder = _build_pipeline(args)
 
     interceptor = Interceptor(
         server_name, integrity=integrity, policy=engine, egress=egress,
-        cost=cost, behavioural=behavioural,
+        cost=cost, behavioural=behavioural, forwarder=forwarder,
     )
     relay = StdioRelay(
         upstream,
