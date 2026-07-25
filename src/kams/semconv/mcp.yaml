@@ -1,0 +1,258 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Semantic conventions for the Model Context Protocol (MCP).
+//
+// STATUS: proposal. The OpenTelemetry GenAI semantic conventions repository
+// carries MCP model definitions, but as of 2026-07 the rendered docs are not
+// published and the model is still in flux. This file is Kams' working
+// definition, written to the conventions' own YAML schema and naming grammar so
+// it can be submitted upstream rather than merely described.
+//
+// Two things here are genuinely unsolved upstream and are called out inline:
+//
+//   1. Trace context propagation. MCP defines no mechanism -- there are no
+//      headers on the stdio transport. We propose W3C traceparent inside the
+//      JSON-RPC `params._meta` object, which the MCP specification reserves for
+//      out-of-band metadata. Kams implements this and degrades visibly when the
+//      client does not participate.
+//
+//   2. Attribution of context cost. Tool results consume the model's context
+//      window, but no attribute exists to attribute that consumption back to the
+//      server that caused it. We propose mcp.context.cost.tokens, with an
+//      explicit flag distinguishing a measured value from an estimated one --
+//      because a cost metric that silently mixes the two is not trustworthy.
+//
+// Anything already settled in the GenAI conventions (gen_ai.*) is referenced,
+// never redefined.
+
+groups:
+  # --------------------------------------------------------------------------
+  - id: registry.mcp
+    type: attribute_group
+    display_name: MCP Attributes
+    brief: >
+      Attributes describing a Model Context Protocol operation between an MCP
+      client (typically an AI agent) and an MCP server.
+    attributes:
+      - id: mcp.method.name
+        type: string
+        stability: development
+        brief: The JSON-RPC method being invoked.
+        note: >
+          Recorded verbatim, including methods not defined by the specification.
+          An unrecognised method must still produce a span: dropping unknown
+          traffic hides exactly the behaviour an operator most needs to see.
+        examples: ["initialize", "tools/list", "tools/call", "resources/read"]
+
+      - id: mcp.server.name
+        type: string
+        stability: development
+        brief: Logical name of the MCP server being addressed.
+        note: >
+          The name the client configured, not a hostname. Stdio servers have no
+          network identity, so the configured name is the only stable
+          identifier available across both transports.
+        examples: ["filesystem", "github", "signoz-mcp"]
+
+      - id: mcp.transport
+        type:
+          members:
+            - id: stdio
+              value: "stdio"
+              stability: development
+              brief: Newline-delimited JSON-RPC over a child process's stdio.
+            - id: http
+              value: "http"
+              stability: development
+              brief: Streamable HTTP transport.
+        stability: development
+        brief: Transport carrying the MCP session.
+
+      - id: mcp.session.id
+        type: string
+        stability: development
+        brief: Identifier for one client-server session.
+        note: >
+          Correlates operations belonging to the same connection. This is the
+          fallback correlation key when trace context is unavailable -- see the
+          note on mcp.trace.propagated below.
+        examples: ["6f1a2b3c4d5e6f70"]
+
+      - id: mcp.request.id
+        type: string
+        stability: development
+        brief: The JSON-RPC request id, as a string.
+        note: >
+          Stringified because JSON-RPC permits both string and integer ids, and
+          an attribute type that varies by message is unusable for querying.
+
+      - id: mcp.tool.name
+        type: string
+        stability: development
+        brief: Name of the tool being invoked.
+        note: >
+          Distinct from gen_ai.tool.name, which describes the tool from the
+          model's perspective. On a `tools/call` span both are typically equal;
+          they diverge when a gateway renames or namespaces tools.
+        examples: ["read_file", "create_issue"]
+
+      - id: mcp.tool.count
+        type: int
+        stability: development
+        brief: Number of tools returned by a `tools/list` response.
+
+      - id: mcp.error.code
+        type: int
+        stability: development
+        brief: JSON-RPC error code from a failed operation.
+        examples: [-32601, -32000]
+
+      - id: mcp.request.size_bytes
+        type: int
+        stability: development
+        brief: Size in bytes of the serialised JSON-RPC request.
+
+      - id: mcp.response.size_bytes
+        type: int
+        stability: development
+        brief: Size in bytes of the serialised JSON-RPC response.
+
+      # --- proposed: context cost attribution --------------------------------
+      - id: mcp.context.cost.tokens
+        type: int
+        stability: development
+        brief: >
+          Model-context tokens consumed by this operation's result.
+        note: >
+          PROPOSED. Tool results are inserted into the model's context window,
+          so an MCP server imposes a token cost on every subsequent inference in
+          the conversation. No existing attribute attributes that cost to the
+          server responsible, which makes per-server cost analysis impossible
+          today. Consumers must read mcp.context.cost.estimated before treating
+          this as ground truth.
+
+      - id: mcp.context.cost.estimated
+        type: boolean
+        stability: development
+        brief: >
+          Whether mcp.context.cost.tokens is an estimate rather than a measured
+          value.
+        note: >
+          PROPOSED, and load-bearing. An instrumentation library generally
+          cannot access the model's tokenizer, so per-call figures are usually
+          estimated. A caller that can reconcile against a provider-reported
+          usage delta should emit the measured value and set this to false.
+          Mixing estimated and measured values under one attribute without a
+          discriminator produces a metric nobody can trust.
+
+      # --- proposed: propagation visibility ----------------------------------
+      - id: mcp.trace.propagated
+        type: boolean
+        stability: development
+        brief: >
+          Whether the client supplied W3C trace context with this operation.
+        note: >
+          PROPOSED. MCP defines no trace-context propagation mechanism; the
+          stdio transport has no headers. We propose carrying `traceparent` (and
+          optionally `tracestate`) inside the JSON-RPC `params._meta` object,
+          which the specification reserves for out-of-band metadata.
+
+          When absent, the MCP span becomes a trace root and loses its parent
+          relationship with the calling agent. Recording that explicitly matters:
+          a silently-rooted span is indistinguishable from a correctly-rooted
+          one, so without this attribute a broken propagation chain looks like a
+          working one.
+
+  # --------------------------------------------------------------------------
+  - id: span.mcp.client
+    type: span
+    span_kind: client
+    stability: development
+    brief: >
+      An MCP operation issued by a client and observed at the client side or by
+      an interposed proxy.
+    note: >
+      Span name SHOULD be `mcp.{mcp.method.name}`, with the tool name appended
+      for `tools/call`: `mcp.tools/call read_file`. This follows the GenAI
+      conventions' `{operation} {target}` grammar.
+
+      When the calling agent is instrumented, this span SHOULD be a child of the
+      `execute_tool` span defined by the GenAI conventions, so that one trace
+      spans the agent's decision and the protocol operation it produced.
+    attributes:
+      - ref: mcp.method.name
+        requirement_level: required
+      - ref: mcp.server.name
+        requirement_level: required
+      - ref: mcp.transport
+        requirement_level: recommended
+      - ref: mcp.session.id
+        requirement_level: recommended
+      - ref: mcp.request.id
+        requirement_level: recommended
+      - ref: mcp.tool.name
+        requirement_level:
+          conditionally_required: when mcp.method.name is `tools/call`
+      - ref: mcp.tool.count
+        requirement_level:
+          conditionally_required: when mcp.method.name is `tools/list`
+      - ref: mcp.error.code
+        requirement_level:
+          conditionally_required: when the operation returns a JSON-RPC error
+      - ref: mcp.request.size_bytes
+        requirement_level: opt_in
+      - ref: mcp.response.size_bytes
+        requirement_level: opt_in
+      - ref: mcp.context.cost.tokens
+        requirement_level: opt_in
+      - ref: mcp.context.cost.estimated
+        requirement_level:
+          conditionally_required: when mcp.context.cost.tokens is present
+      - ref: mcp.trace.propagated
+        requirement_level: recommended
+      - ref: gen_ai.conversation.id
+        requirement_level:
+          conditionally_required: when the operation is attributable to a conversation
+      - ref: gen_ai.agent.name
+        requirement_level: opt_in
+
+  # --------------------------------------------------------------------------
+  - id: metric.mcp.client.operation.duration
+    type: metric
+    metric_name: mcp.client.operation.duration
+    stability: development
+    instrument: histogram
+    unit: "s"
+    brief: Duration of an MCP client operation.
+    attributes:
+      - ref: mcp.method.name
+        requirement_level: required
+      - ref: mcp.server.name
+        requirement_level: required
+      - ref: mcp.tool.name
+        requirement_level:
+          conditionally_required: when mcp.method.name is `tools/call`
+      - ref: mcp.error.code
+        requirement_level:
+          conditionally_required: when the operation failed
+
+  - id: metric.mcp.context.cost.tokens
+    type: metric
+    metric_name: mcp.context.cost.tokens
+    stability: development
+    instrument: histogram
+    unit: "{token}"
+    brief: >
+      PROPOSED. Model-context tokens consumed by MCP tool results, attributed to
+      the server that produced them.
+    note: >
+      Enables the question that currently cannot be asked: which MCP server is
+      consuming my context window, and what is it costing. Always report
+      mcp.context.cost.estimated alongside.
+    attributes:
+      - ref: mcp.server.name
+        requirement_level: required
+      - ref: mcp.tool.name
+        requirement_level: recommended
+      - ref: mcp.context.cost.estimated
+        requirement_level: required

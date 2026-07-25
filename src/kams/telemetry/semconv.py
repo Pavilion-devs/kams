@@ -64,6 +64,11 @@ MCP_CONTEXT_COST_ESTIMATED: Final = "mcp.context.cost.estimated"
 
 MCP_ERROR_CODE: Final = "mcp.error.code"
 
+# Proposed. Whether the client supplied W3C trace context via params._meta.
+# We emit what we propose upstream -- a convention nobody implements is a
+# suggestion, not a contribution.
+MCP_TRACE_PROPAGATED: Final = "mcp.trace.propagated"
+
 # --- Kams: ours --------------------------------------------------------------
 
 KAMS_FINDING_KIND: Final = "kams.finding.kind"

@@ -199,6 +199,10 @@ class Interceptor:
                 sc.MCP_REQUEST_SIZE: len(msg.raw),
                 # Records the propagation gap instead of hiding it: an orphaned
                 # span is otherwise indistinguishable from a correctly rooted one.
+                sc.MCP_TRACE_PROPAGATED: parent_ctx is not None,
+                # Retained alongside the proposed attribute: our own dashboards
+                # query this, and the two express the same fact from opposite
+                # directions.
                 sc.KAMS_TRACE_ORPHANED: parent_ctx is None,
                 **({sc.MCP_TOOL_NAME: tool} if tool else {}),
             },
