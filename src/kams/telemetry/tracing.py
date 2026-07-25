@@ -14,7 +14,8 @@ from opentelemetry import metrics, trace
 from opentelemetry.context import Context
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics import Counter, Histogram, MeterProvider, UpDownCounter
+from opentelemetry.sdk.metrics.export import AggregationTemporality
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
@@ -61,8 +62,21 @@ def setup(service_name: str, *, endpoint: str | None = None, extra_resource: dic
         )
         trace.set_tracer_provider(provider)
 
+        # Delta, not cumulative. A shim is short-lived: it exports once or
+        # twice and exits. Cumulative counters from a fresh process restart at
+        # zero every run, so rate() and increase() see no usable delta and the
+        # panels render empty even though the data arrived. Delta temporality
+        # makes each export self-contained, which is what SigNoz wants anyway.
         reader = PeriodicExportingMetricReader(
-            OTLPMetricExporter(endpoint=endpoint, insecure=True),
+            OTLPMetricExporter(
+                endpoint=endpoint,
+                insecure=True,
+                preferred_temporality={
+                    Counter: AggregationTemporality.DELTA,
+                    UpDownCounter: AggregationTemporality.DELTA,
+                    Histogram: AggregationTemporality.DELTA,
+                },
+            ),
             export_interval_millis=5000,
         )
         metrics.set_meter_provider(MeterProvider(resource=resource, metric_readers=[reader]))

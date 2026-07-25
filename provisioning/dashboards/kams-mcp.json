@@ -1,0 +1,229 @@
+{
+  "title": "Kams — MCP Observability & Control",
+  "description": "Traffic, reliability, integrity, and enforcement across every MCP server behind Kams. Provisioned as code from provisioning/dashboards/kams-mcp.json — never hand-clicked.",
+  "tags": ["kams", "mcp", "agent-observability"],
+  "version": "v5",
+  "layout": [
+    { "i": "traffic", "x": 0, "y": 0, "w": 6, "h": 6 },
+    { "i": "latency", "x": 6, "y": 0, "w": 6, "h": 6 },
+    { "i": "errors", "x": 0, "y": 6, "w": 6, "h": 6 },
+    { "i": "integrity", "x": 6, "y": 6, "w": 6, "h": 6 },
+    { "i": "enforcement", "x": 0, "y": 12, "w": 6, "h": 6 },
+    { "i": "findings", "x": 6, "y": 12, "w": 6, "h": 6 }
+  ],
+  "widgets": [
+    {
+      "id": "traffic",
+      "title": "MCP call rate by server",
+      "description": "Which third-party servers this agent fleet actually depends on.",
+      "panelTypes": "graph",
+      "query": {
+        "queryType": "builder",
+        "builder": {
+          "queryFormulas": [],
+          "queryData": [
+            {
+              "queryName": "A",
+              "dataSource": "metrics",
+              "expression": "A",
+              "stepInterval": 60,
+              "disabled": false,
+              "aggregations": [
+                {
+                  "metricName": "mcp.tool.call.count",
+                  "timeAggregation": "rate",
+                  "spaceAggregation": "sum"
+                }
+              ],
+              "filter": { "expression": "" },
+              "groupBy": [{ "key": "server", "dataType": "string", "type": "tag" }],
+              "legend": "{{server}}",
+              "limit": 100,
+              "having": [],
+              "orderBy": [{ "columnName": "A", "order": "desc" }]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "latency",
+      "title": "p95 MCP operation duration by server",
+      "description": "A slow MCP server is a slow agent. Attributes the latency to the dependency responsible.",
+      "panelTypes": "graph",
+      "query": {
+        "queryType": "builder",
+        "builder": {
+          "queryFormulas": [],
+          "queryData": [
+            {
+              "queryName": "A",
+              "dataSource": "metrics",
+              "expression": "A",
+              "stepInterval": 60,
+              "disabled": false,
+              "aggregations": [
+                {
+                  "metricName": "mcp.client.operation.duration.bucket",
+                  "timeAggregation": "",
+                  "spaceAggregation": "p95"
+                }
+              ],
+              "filter": { "expression": "" },
+              "groupBy": [{ "key": "server", "dataType": "string", "type": "tag" }],
+              "legend": "{{server}}",
+              "limit": 100,
+              "having": [],
+              "orderBy": [{ "columnName": "A", "order": "desc" }]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "errors",
+      "title": "MCP errors by server and tool",
+      "description": "Reliability of code you did not write and cannot patch.",
+      "panelTypes": "graph",
+      "query": {
+        "queryType": "builder",
+        "builder": {
+          "queryFormulas": [],
+          "queryData": [
+            {
+              "queryName": "A",
+              "dataSource": "metrics",
+              "expression": "A",
+              "stepInterval": 60,
+              "disabled": false,
+              "aggregations": [
+                {
+                  "metricName": "mcp.tool.error.count",
+                  "timeAggregation": "rate",
+                  "spaceAggregation": "sum"
+                }
+              ],
+              "filter": { "expression": "" },
+              "groupBy": [
+                { "key": "server", "dataType": "string", "type": "tag" },
+                { "key": "tool", "dataType": "string", "type": "tag" }
+              ],
+              "legend": "{{server}} · {{tool}}",
+              "limit": 100,
+              "having": [],
+              "orderBy": [{ "columnName": "A", "order": "desc" }]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "integrity",
+      "title": "Integrity findings by severity",
+      "description": "Tool-definition drift and injection detections. CRITICAL means a pinned definition changed into something that reads as prompt injection.",
+      "panelTypes": "graph",
+      "query": {
+        "queryType": "builder",
+        "builder": {
+          "queryFormulas": [],
+          "queryData": [
+            {
+              "queryName": "A",
+              "dataSource": "metrics",
+              "expression": "A",
+              "stepInterval": 60,
+              "disabled": false,
+              "aggregations": [
+                {
+                  "metricName": "mcp.integrity.drift.count",
+                  "timeAggregation": "increase",
+                  "spaceAggregation": "sum"
+                }
+              ],
+              "filter": { "expression": "" },
+              "groupBy": [
+                { "key": "severity", "dataType": "string", "type": "tag" },
+                { "key": "server", "dataType": "string", "type": "tag" }
+              ],
+              "legend": "{{severity}} · {{server}}",
+              "limit": 100,
+              "having": [],
+              "orderBy": [{ "columnName": "A", "order": "desc" }]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "enforcement",
+      "title": "Enforcement actions by rule",
+      "description": "What Kams actually did, and which policy rule decided it. This is the 'own them' half of the theme.",
+      "panelTypes": "graph",
+      "query": {
+        "queryType": "builder",
+        "builder": {
+          "queryFormulas": [],
+          "queryData": [
+            {
+              "queryName": "A",
+              "dataSource": "metrics",
+              "expression": "A",
+              "stepInterval": 60,
+              "disabled": false,
+              "aggregations": [
+                {
+                  "metricName": "kams.enforcement.count",
+                  "timeAggregation": "increase",
+                  "spaceAggregation": "sum"
+                }
+              ],
+              "filter": { "expression": "" },
+              "groupBy": [
+                { "key": "action", "dataType": "string", "type": "tag" },
+                { "key": "rule", "dataType": "string", "type": "tag" }
+              ],
+              "legend": "{{action}} · {{rule}}",
+              "limit": 100,
+              "having": [],
+              "orderBy": [{ "columnName": "A", "order": "desc" }]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "findings",
+      "title": "Detections by detector",
+      "description": "Which detector is earning its keep. A detector that never fires and one that always fires are both problems.",
+      "panelTypes": "graph",
+      "query": {
+        "queryType": "builder",
+        "builder": {
+          "queryFormulas": [],
+          "queryData": [
+            {
+              "queryName": "A",
+              "dataSource": "metrics",
+              "expression": "A",
+              "stepInterval": 60,
+              "disabled": false,
+              "aggregations": [
+                {
+                  "metricName": "mcp.integrity.drift.count",
+                  "timeAggregation": "increase",
+                  "spaceAggregation": "sum"
+                }
+              ],
+              "filter": { "expression": "" },
+              "groupBy": [{ "key": "detector", "dataType": "string", "type": "tag" }],
+              "legend": "{{detector}}",
+              "limit": 100,
+              "having": [],
+              "orderBy": [{ "columnName": "A", "order": "desc" }]
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
