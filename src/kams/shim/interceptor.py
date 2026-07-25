@@ -50,9 +50,16 @@ class Interceptor:
     testable without a transport.
     """
 
-    def __init__(self, server_name: str, *, session_id: str | None = None) -> None:
+    def __init__(
+        self,
+        server_name: str,
+        *,
+        session_id: str | None = None,
+        integrity: Any | None = None,
+    ) -> None:
         self.server_name = server_name
         self.session_id = session_id or uuid.uuid4().hex[:16]
+        self.integrity = integrity
         self._tracer = tracing.tracer("kams.shim")
         self._pending: dict[str | int, _Pending] = {}
 
@@ -62,6 +69,33 @@ class Interceptor:
         )
         self._c_calls = m.create_counter(sc.METRIC_TOOL_CALLS, description="MCP tool calls")
         self._c_errors = m.create_counter(sc.METRIC_TOOL_ERRORS, description="MCP tool errors")
+        self._c_drift = m.create_counter(
+            sc.METRIC_INTEGRITY_DRIFT, description="Tool-definition drift and injection findings"
+        )
+
+    def _emit(self, span, findings: list) -> None:
+        """Attach findings to the span as events and count them.
+
+        Events rather than attributes: a single `tools/list` can produce several
+        findings, and attributes cannot repeat a key. Detector failure is caught
+        here so a bad regex can never take down the relay (principle 1).
+        """
+        for f in findings:
+            try:
+                span.add_event(f"kams.finding.{f.kind.value.lower()}", attributes=f.to_attributes())
+                self._c_drift.add(
+                    1,
+                    {
+                        "server": f.server,
+                        "kind": f.kind.value,
+                        "severity": f.severity.name,
+                        "detector": f.detector,
+                        **({"tool": f.tool} if f.tool else {}),
+                    },
+                )
+                log.warning("[%s] %s: %s", f.severity.name, f.detector, f.summary)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("failed to emit finding: %r", exc)
 
     # ---- client -> server ---------------------------------------------------
 
@@ -144,9 +178,24 @@ class Interceptor:
                 self._c_errors.add(1, labels)
             else:
                 span.set_status(Status(StatusCode.OK))
+
                 if pending.method == mcp.TOOLS_LIST:
                     tools = mcp.extract_tools(msg.result)
                     span.set_attribute(sc.MCP_TOOL_COUNT, len(tools))
+                    if self.integrity is not None:
+                        baseline = self.integrity.store.get(self.server_name)
+                        self._emit(span, self.integrity.on_tools_list(self.server_name, tools))
+                        span.set_attribute(
+                            sc.KAMS_BASELINE_STATE,
+                            baseline.state if baseline else "first_sighting",
+                        )
+
+                elif pending.method == mcp.TOOLS_CALL and self.integrity is not None and pending.tool:
+                    # Descriptions are not the only injection surface -- any
+                    # server output reaches the model's context.
+                    texts = mcp.extract_result_text(msg.result)
+                    if texts:
+                        self._emit(span, self.integrity.on_result_text(self.server_name, pending.tool, texts))
 
             if pending.method == mcp.TOOLS_CALL:
                 self._c_calls.add(1, labels)

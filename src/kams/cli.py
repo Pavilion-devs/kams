@@ -42,12 +42,29 @@ def main(argv: list[str] | None = None) -> int:
         help="relay only, emit nothing (used by the golden transparency tests)",
     )
     shim.add_argument("--otlp-endpoint", default=None, help="OTLP gRPC endpoint")
+    shim.add_argument("--lock", default="kams.lock", help="path to the pinned tool-definition lockfile")
+    shim.add_argument("--no-integrity", action="store_true", help="disable the integrity detector")
+
+    pin = sub.add_parser(
+        "pin",
+        help="promote a server's recorded tool definitions to pinned",
+        description=(
+            "Pinning turns trust-on-first-use into an assertion. After pinning, any "
+            "change to a tool's name, description, or schema is a finding -- which is "
+            "what makes a rug pull visible."
+        ),
+    )
+    pin.add_argument("server", nargs="?", help="server name (omit to pin every recorded server)")
+    pin.add_argument("--lock", default="kams.lock")
+
+    status = sub.add_parser("status", help="show recorded servers and their trust state")
+    status.add_argument("--lock", default="kams.lock")
 
     args = parser.parse_args(ours)
 
     # stderr only: stdout is the MCP wire and must carry nothing but protocol.
     logging.basicConfig(
-        level=getattr(logging, args.log_level.upper(), logging.WARNING),
+        level=getattr(logging, getattr(args, "log_level", "warning").upper(), logging.WARNING),
         stream=sys.stderr,
         format="kams %(levelname)s %(name)s: %(message)s",
     )
@@ -56,6 +73,10 @@ def main(argv: list[str] | None = None) -> int:
         if not upstream:
             parser.error("shim requires an upstream command after `--`")
         return asyncio.run(_run_shim(args, upstream))
+    if args.cmd == "pin":
+        return _run_pin(args)
+    if args.cmd == "status":
+        return _run_status(args)
 
     return 1
 
@@ -66,12 +87,20 @@ async def _run_shim(args, upstream: list[str]) -> int:
     if args.no_telemetry:
         return await StdioRelay(upstream).run()
 
+    from kams.detect.baseline import BaselineStore
+    from kams.detect.integrity import IntegrityDetector
     from kams.shim.interceptor import Interceptor
     from kams.telemetry import tracing
 
     tracing.setup("kams-shim", endpoint=args.otlp_endpoint, extra_resource={"kams.server": server_name})
-    interceptor = Interceptor(server_name)
 
+    store = None
+    integrity = None
+    if not args.no_integrity:
+        store = BaselineStore(args.lock)
+        integrity = IntegrityDetector(store)
+
+    interceptor = Interceptor(server_name, integrity=integrity)
     relay = StdioRelay(
         upstream,
         on_client_message=interceptor.on_client_message,
@@ -81,7 +110,47 @@ async def _run_shim(args, upstream: list[str]) -> int:
         return await relay.run()
     finally:
         interceptor.close()
+        if store is not None:
+            # Persist any provisional baseline learned this session, so the next
+            # run can detect drift against it.
+            try:
+                store.save()
+            except OSError as exc:
+                print(f"kams: could not write {args.lock}: {exc}", file=sys.stderr)
         tracing.shutdown()
+
+
+def _run_pin(args) -> int:
+    from kams.detect.baseline import BaselineStore
+
+    store = BaselineStore(args.lock)
+    if not store.servers:
+        print(f"kams: nothing recorded in {args.lock} yet — run the shim once first", file=sys.stderr)
+        return 1
+
+    targets = [args.server] if args.server else list(store.servers)
+    for name in targets:
+        if name not in store.servers:
+            print(f"kams: unknown server {name!r}", file=sys.stderr)
+            return 1
+        store.pin(name)
+        print(f"pinned {name} ({len(store.servers[name].tools)} tools)")
+    store.save()
+    return 0
+
+
+def _run_status(args) -> int:
+    from kams.detect.baseline import BaselineStore
+
+    store = BaselineStore(args.lock)
+    if not store.servers:
+        print(f"no servers recorded in {args.lock}")
+        return 0
+    for name, baseline in sorted(store.servers.items()):
+        print(f"{name:24} {baseline.state:12} {len(baseline.tools)} tools")
+        for tname, t in sorted(baseline.tools.items()):
+            print(f"    {tname:20} {t.digest}")
+    return 0
 
 
 if __name__ == "__main__":
