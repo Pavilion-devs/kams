@@ -46,6 +46,8 @@ def main(argv: list[str] | None = None) -> int:
     shim.add_argument("--no-integrity", action="store_true", help="disable the integrity detector")
     shim.add_argument("--policy", default="policy.yaml", help="path to the policy file")
     shim.add_argument("--no-enforce", action="store_true", help="observe only; never block")
+    shim.add_argument("--state", default="kams-state.json",
+                      help="shared enforcement state, written by kamsd and other shims")
 
     pin = sub.add_parser(
         "pin",
@@ -61,6 +63,22 @@ def main(argv: list[str] | None = None) -> int:
 
     status = sub.add_parser("status", help="show recorded servers and their trust state")
     status.add_argument("--lock", default="kams.lock")
+    status.add_argument("--state", default="kams-state.json")
+
+    daemon = sub.add_parser(
+        "daemon",
+        help="run the control plane: receive SigNoz alert webhooks and enforce",
+        description=(
+            "The shim sees one connection right now; SigNoz sees every agent over "
+            "time. Fleet-scale, time-windowed conditions are not expressible in the "
+            "shim, so alerts arrive here and land in the same shared state the "
+            "reflex path writes to."
+        ),
+    )
+    daemon.add_argument("--port", type=int, default=8787)
+    daemon.add_argument("--state", default="kams-state.json")
+    daemon.add_argument("--ttl", default="1h", help="how long an alert-driven quarantine lasts")
+    daemon.add_argument("--log-level", default=os.environ.get("KAMS_LOG_LEVEL", "info"))
 
     args = parser.parse_args(ours)
 
@@ -79,8 +97,35 @@ def main(argv: list[str] | None = None) -> int:
         return _run_pin(args)
     if args.cmd == "status":
         return _run_status(args)
+    if args.cmd == "daemon":
+        return _run_daemon(args)
 
     return 1
+
+
+def _run_daemon(args) -> int:
+    import time
+
+    from kams.daemon.state import SharedState
+    from kams.daemon.webhook import serve
+    from kams.policy.model import parse_duration
+    from kams.telemetry import tracing
+
+    tracing.setup("kamsd")
+    state = SharedState(args.state)
+    ttl = parse_duration(args.ttl) or 3600.0
+    serve(state, port=args.port, ttl=ttl)
+
+    print(f"kamsd listening on :{args.port}  state={args.state}  ttl={int(ttl)}s")
+    print("point a SigNoz webhook notification channel at this endpoint")
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        print("\nstopped")
+    finally:
+        tracing.shutdown()
+    return 0
 
 
 async def _run_shim(args, upstream: list[str]) -> int:
@@ -114,7 +159,9 @@ async def _run_shim(args, upstream: list[str]) -> int:
             # observe-only and say so loudly (principle 1).
             print(f"kams: policy {args.policy} unreadable ({exc}); observing only", file=sys.stderr)
             policy = Policy.permissive()
-        engine = PolicyEngine(policy)
+        from kams.daemon.state import SharedState
+
+        engine = PolicyEngine(policy, shared=SharedState(args.state))
 
     interceptor = Interceptor(server_name, integrity=integrity, policy=engine)
     relay = StdioRelay(
@@ -158,14 +205,22 @@ def _run_pin(args) -> int:
 def _run_status(args) -> int:
     from kams.detect.baseline import BaselineStore
 
+    from kams.daemon.state import SharedState
+
     store = BaselineStore(args.lock)
     if not store.servers:
         print(f"no servers recorded in {args.lock}")
-        return 0
     for name, baseline in sorted(store.servers.items()):
         print(f"{name:24} {baseline.state:12} {len(baseline.tools)} tools")
         for tname, t in sorted(baseline.tools.items()):
             print(f"    {tname:20} {t.digest}")
+
+    restrictions = SharedState(getattr(args, "state", "kams-state.json")).active(force=True)
+    if restrictions:
+        print("\nstanding restrictions")
+        for r in restrictions:
+            remaining = f"{int(r.expires_at - __import__('time').time())}s" if r.expires_at else "no expiry"
+            print(f"    {r.server:20} {r.action:18} [{r.rule}] via {r.origin}, {remaining} left")
     return 0
 
 

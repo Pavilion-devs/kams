@@ -110,12 +110,41 @@ async def apply_dashboards(session) -> int:
     return failures
 
 
+async def ensure_channel(session) -> None:
+    """The alert routes here, so the channel has to exist first.
+
+    host.docker.internal resolves the host from inside the SigNoz container on
+    Docker Desktop; localhost would be the container itself.
+    """
+    existing = await call(session, "signoz_list_notification_channels")
+    if "kams-webhook" in existing["text"]:
+        ok("notification channel kams-webhook already present")
+        return
+    res = await call(
+        session,
+        "signoz_create_notification_channel",
+        name="kams-webhook",
+        type="webhook",
+        webhook_url="http://host.docker.internal:8787/",
+        searchContext="Provisioned by Kams: route alerts to the enforcement daemon",
+    )
+    (fail if res["is_error"] else ok)(
+        f"notification channel kams-webhook: {res['text'][:160]}" if res["is_error"]
+        else "created notification channel kams-webhook"
+    )
+
+
 async def apply_alerts(session) -> int:
     if not ALERTS.exists():
         return 0
+    await ensure_channel(session)
+    existing = await call(session, "signoz_list_alert_rules")
     failures = 0
     for path in sorted(ALERTS.glob("*.json")):
         spec = json.loads(path.read_text())
+        if spec.get("alert") and spec["alert"] in existing["text"]:
+            ok(f"alert {BOLD}{spec['alert']}{RESET} already present")
+            continue
         res = await call(session, "signoz_create_alert", **spec)
         if res["is_error"]:
             fail(f"{path.name}: {res['text'][:400]}")

@@ -56,8 +56,13 @@ async def list_tools(session) -> list[str]:
     return [t.name for t in (await session.list_tools()).tools]
 
 
-async def call(session, name: str, **kwargs) -> Any:
-    result = await session.call_tool(name, kwargs)
+async def call(session, tool: str, /, **kwargs) -> Any:
+    """Invoke an MCP tool.
+
+    `tool` is positional-only: several SigNoz tools take their own `name`
+    argument, and a keyword parameter here would collide with it.
+    """
+    result = await session.call_tool(tool, kwargs)
     texts = [c.text for c in result.content if getattr(c, "type", None) == "text"]
     return {"is_error": bool(result.isError), "text": "\n".join(texts)}
 

@@ -21,6 +21,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from kams.detect.base import Finding, Severity
 from kams.policy.model import Action, Policy, Rule
@@ -94,10 +95,15 @@ class PolicyEngine:
         *,
         clock: Clock = time.time,
         on_enforce: Callable[[Decision, Restriction], None] | None = None,
+        shared: Any | None = None,
     ) -> None:
         self.policy = policy or Policy.permissive()
         self._clock = clock
         self._on_enforce = on_enforce
+        # Cross-process standing state. When present, restrictions installed by
+        # any other shim or by the SigNoz alert webhook are honoured here too --
+        # that is what makes a quarantine fleet-wide rather than per-connection.
+        self._shared = shared
         self._restrictions: list[Restriction] = []
 
     # ---- evaluation ----------------------------------------------------------
@@ -153,6 +159,8 @@ class PolicyEngine:
             )
             self._restrictions.append(restriction)
             installed.append(restriction)
+            # Publish so other connections honour it immediately.
+            self._publish(restriction, origin="reflex")
             log.warning("enforcing %s on %s [%s]", d.action.value, d.server, d.rule)
             if self._on_enforce:
                 try:
@@ -166,7 +174,7 @@ class PolicyEngine:
     def check(self, server: str, tool: str | None) -> Verdict:
         """Called in the request path. Must stay cheap."""
         self._expire()
-        for r in self._restrictions:
+        for r in self._all():
             if not _glob(r.server, server):
                 continue
             if r.action is Action.QUARANTINE_SERVER:
@@ -174,6 +182,33 @@ class PolicyEngine:
             if r.action is Action.BLOCK_TOOL and tool and _glob(r.tool or "*", tool):
                 return Verdict(allowed=False, restriction=r)
         return Verdict(allowed=True)
+
+    def _all(self) -> list[Restriction]:
+        """In-process restrictions plus anything in shared state.
+
+        Shared state is read through a short-lived cache, so this stays cheap
+        enough for the request path. An unreadable state file yields nothing
+        rather than raising -- fail open (principle 1).
+        """
+        out = list(self._restrictions)
+        if self._shared is None:
+            return out
+        try:
+            for sr in self._shared.active():
+                out.append(
+                    Restriction(
+                        action=Action(sr.action),
+                        server=sr.server,
+                        tool=sr.tool,
+                        rule=sr.rule,
+                        reason=sr.reason,
+                        expires_at=sr.expires_at,
+                        created_at=sr.created_at,
+                    )
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("shared state unavailable: %r", exc)
+        return out
 
     def quarantine(self, server: str, *, rule: str, reason: str, ttl: float | None = None) -> Restriction:
         """Direct entry point for the SigNoz webhook path."""
@@ -191,7 +226,34 @@ class PolicyEngine:
         log.warning("quarantined %s [%s]: %s", server, rule, reason)
         return r
 
+    def _publish(self, r: Restriction, *, origin: str) -> None:
+        """Best-effort persistence. Never let it break the request path."""
+        if self._shared is None:
+            return
+        try:
+            from kams.daemon.state import StoredRestriction
+
+            self._shared.add(
+                StoredRestriction(
+                    action=r.action.value,
+                    server=r.server,
+                    tool=r.tool,
+                    rule=r.rule,
+                    reason=r.reason,
+                    created_at=r.created_at,
+                    expires_at=r.expires_at,
+                    origin=origin,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("could not publish restriction: %r", exc)
+
     def lift(self, server: str) -> int:
+        if self._shared is not None:
+            try:
+                self._shared.lift(server)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("could not lift in shared state: %r", exc)
         before = len(self._restrictions)
         self._restrictions = [r for r in self._restrictions if r.server != server]
         return before - len(self._restrictions)

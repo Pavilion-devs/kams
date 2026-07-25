@@ -1,0 +1,65 @@
+{
+  "alert": "Kams — MCP tool definition poisoned (CRITICAL)",
+  "alertType": "METRIC_BASED_ALERT",
+  "description": "A pinned MCP tool definition changed into text that reads as prompt injection. Routes to the Kams enforcement daemon, which quarantines the server across every connection.",
+  "ruleType": "threshold_rule",
+  "version": "v5",
+  "schemaVersion": "v2alpha1",
+  "condition": {
+    "compositeQuery": {
+      "queryType": "builder",
+      "panelType": "graph",
+      "queries": [
+        {
+          "type": "builder_query",
+          "spec": {
+            "name": "A",
+            "signal": "metrics",
+            "stepInterval": 60,
+            "aggregations": [
+              {
+                "metricName": "mcp.integrity.drift.count",
+                "timeAggregation": "increase",
+                "spaceAggregation": "sum"
+              }
+            ],
+            "limit": 100,
+            "order": [{ "key": { "name": "__result" }, "direction": "desc" }],
+            "filter": { "expression": "severity = 'CRITICAL'" },
+            "groupBy": [
+              { "name": "server", "fieldContext": "attribute", "fieldDataType": "string" },
+              { "name": "severity", "fieldContext": "attribute", "fieldDataType": "string" }
+            ],
+            "legend": "{{server}}"
+          }
+        }
+      ]
+    },
+    "selectedQueryName": "A",
+    "thresholds": {
+      "kind": "basic",
+      "spec": [
+        {
+          "name": "critical",
+          "op": "above",
+          "matchType": "at_least_once",
+          "target": 0,
+          "channels": ["kams-webhook"]
+        }
+      ]
+    }
+  },
+  "evaluation": {
+    "kind": "rolling",
+    "spec": { "evalWindow": "5m", "frequency": "1m" }
+  },
+  "notificationSettings": {
+    "groupBy": ["server"],
+    "renotify": { "enabled": false }
+  },
+  "labels": { "severity": "critical", "component": "kams" },
+  "annotations": {
+    "description": "Server {{$labels.server}} produced {{$value}} CRITICAL integrity finding(s). A pinned tool definition changed into text that reads as an injection attempt.",
+    "summary": "MCP tool definition poisoned on {{$labels.server}}"
+  }
+}
