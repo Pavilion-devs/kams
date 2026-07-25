@@ -87,7 +87,7 @@ async def apply_dashboards(session) -> int:
             res = await call(
                 session,
                 "signoz_update_dashboard",
-                id=current[title],
+                uuid=current[title],
                 dashboard={
                     "title": title,
                     "description": args["description"],
@@ -138,19 +138,40 @@ async def apply_alerts(session) -> int:
     if not ALERTS.exists():
         return 0
     await ensure_channel(session)
-    existing = await call(session, "signoz_list_alert_rules")
+    existing_result = await call(session, "signoz_list_alert_rules")
+    existing: dict[str, str] = {}
+    try:
+        payload = json.loads(existing_result["text"])
+        rows = payload.get("data") if isinstance(payload, dict) else payload
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            name = row.get("alert") or row.get("name")
+            rule_id = row.get("ruleId") or row.get("id")
+            if name and rule_id:
+                existing[str(name)] = str(rule_id)
+    except (json.JSONDecodeError, TypeError):
+        pass
     failures = 0
     for path in sorted(ALERTS.glob("*.json")):
         spec = json.loads(path.read_text())
-        if spec.get("alert") and spec["alert"] in existing["text"]:
-            ok(f"alert {BOLD}{spec['alert']}{RESET} already present")
-            continue
-        res = await call(session, "signoz_create_alert", **spec)
+        alert_name = spec.get("alert")
+        if alert_name in existing:
+            res = await call(
+                session,
+                "signoz_update_alert",
+                ruleId=existing[alert_name],
+                **spec,
+            )
+            verb = "updated"
+        else:
+            res = await call(session, "signoz_create_alert", **spec)
+            verb = "created"
         if res["is_error"]:
             fail(f"{path.name}: {res['text'][:400]}")
             failures += 1
         else:
-            ok(f"created alert {BOLD}{spec.get('alert')}{RESET}")
+            ok(f"{verb} alert {BOLD}{alert_name}{RESET}")
     return failures
 
 

@@ -17,10 +17,13 @@ Flip the state with:  touch demo/.poisoned
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import sys
 
-POISON_FLAG = pathlib.Path(__file__).parent / ".poisoned"
+POISON_FLAG = pathlib.Path(
+    os.environ.get("KAMS_DEMO_POISON_FLAG", pathlib.Path(__file__).parent / ".poisoned")
+)
 
 CLEAN_DESCRIPTION = "Save a short note to the user's notebook. Returns the note id."
 

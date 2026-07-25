@@ -1,0 +1,148 @@
+export const metadata = {
+  title: "Egress, cost & behaviour",
+  description:
+    "Sensitive-class classification without leaking values, context-cost attribution with honest estimates, and reliability checks that do not cry wolf.",
+};
+
+<Eyebrow>Detectors</Eyebrow>
+
+# Egress, cost &amp; behaviour
+
+<Lede>
+Three more detector families: what is leaving the process, what it costs your context
+window, and whether the interaction itself is healthy.
+</Lede>
+
+## Sensitive egress
+
+MCP arguments carry your data off-process into third-party code. The egress classifier
+inspects arguments **before forwarding**, while the data can still be stopped.
+
+<Callout type="danger" title="Never log a secret to prove a secret leaked">
+Findings carry the class, a count, the JSON path, and a salted digest — never the value. A
+detector that copies credentials into your observability backend has made the problem
+worse, not visible.
+</Callout>
+
+### Classes
+
+| Class | Severity | Matched by |
+|---|---|---|
+| `private_key` | Critical | PEM `BEGIN … PRIVATE KEY` header |
+| `aws_key` | Critical | `AKIA`/`ASIA`/`AIDA`/`AROA` + 16 |
+| `github_token` | Critical | `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` + 36 |
+| `slack_token` | Critical | `xoxb-`/`xoxa-`/`xoxp-`/`xoxr-`/`xoxs-` |
+| `anthropic_key` | Critical | `sk-ant-` + 20 |
+| `openai_key` | Critical | `sk-` / `sk-proj-` + 32 |
+| `jwt` | High | three base64url segments beginning `eyJ` |
+| `bearer_token` | High | `Bearer ` + 20 |
+| `card_number` | High | 13–19 digits **passing Luhn** |
+| `named_secret` | High | key *name* matches `password`, `token`, `api_key`, … |
+| `email` | Medium | address shape |
+| `phone` | Medium | international/NANP shape |
+| `high_entropy_secret` | Medium | 24–200 chars, no spaces, Shannon entropy > 4.2 |
+
+Three details make this usable rather than noisy:
+
+- **Luhn on card shapes.** Card-length digit runs are common in ordinary data — IDs,
+  timestamps. Requiring the checksum turns a noisy pattern into a signal.
+- **Key names count.** A field called `password` holding `hunter2` matches no credential
+  pattern and is still a credential.
+- **Entropy is a last resort.** It only runs when nothing specific matched, and only on a
+  whole value that looks like an opaque credential rather than prose. Otherwise it fires on
+  every base64 blob in a document.
+
+### Sensitivity is a pair, not a payload
+
+Credentials reaching *any* unvetted third party is the case with no benign reading. Email
+addresses reaching a CRM server is expected and boring. The detector only reports what it
+saw; policy expresses the `(class, destination)` pairing:
+
+```yaml
+- name: block-credential-egress
+  match:
+    kind: EGRESS_SENSITIVE
+    classes: [aws_key, private_key, jwt, bearer_token]
+  unless:
+    server: [vault-mcp]
+  action: block_tool
+```
+
+### Redaction is typed
+
+When a `redact_args` restriction is in force, matched spans are replaced with
+`[kams:redacted:<class>]` rather than blanked. The model still learns an email was present
+and can reason about it, without receiving the address — blanking the field entirely
+changes the tool's semantics and tends to make agents retry.
+
+## Context cost
+
+Tool results are inserted into the model's context, so every MCP server imposes a token
+cost on every subsequent inference in that conversation. Nothing today attributes that cost
+back to the dependency responsible.
+
+<Steps>
+  <Step title="Estimate on the way through">
+    The interceptor estimates result tokens from byte size (`3.6` bytes/token before
+    calibration) and emits `mcp.context.cost.estimated=true`.
+  </Step>
+  <Step title="Reconcile against ground truth">
+    An instrumented agent reports the real `usage.inputTokens` delta for a turn.
+    `reconcile()` distributes it across the results that entered context, proportional to
+    their estimates, and emits those points with `estimated=false`.
+  </Step>
+  <Step title="Calibrate forward">
+    A per-server correction factor is updated as an exponential moving average
+    (weight `0.3`), clamped to `[0.25, 4.0]` — a factor outside that range means the
+    reconciliation matched the wrong turn, not an unusual encoding.
+  </Step>
+</Steps>
+
+<Callout type="note" title="No currency claim">
+Per-call figures start as an estimate and get progressively less wrong; turn-level figures
+are ground truth. A cost metric that silently mixed the two would not be one anyone should
+trust — which is why the `estimated` discriminator is mandatory on every point.
+</Callout>
+
+A `COST_SPIKE` finding is raised at `20,000` tokens for a single result, escalating to
+`HIGH` at double that.
+
+## Behaviour
+
+The other detectors ask *what* crossed the boundary. This one asks whether the interaction
+itself is healthy, which needs history rather than a single message.
+
+<Callout type="tip" title="Repetition is not the same as being stuck">
+An agent polling a build status calls the same tool with the same arguments a dozen times,
+and that is correct behaviour. The discriminator is the **result**: identical call plus
+identical result means the agent learned nothing. Identical call plus a changing result is
+polling, and polling is fine.
+</Callout>
+
+| Detector | Fires when | Default |
+|---|---|---|
+| `behavioural.thrash` | Same tool, same args, **same result** | 4 repeats in 120 s |
+| `behavioural.retry_storm` | Consecutive failures on one tool | 4 in a row |
+| `behavioural.error_rate` | Error ratio over the window | ≥ 50%, min 6 calls |
+| `behavioural.latency_degradation` | Slow against the tool's **own** median | ≥ 4× median, ≥ 1 s floor, ≥ 5 samples |
+
+Two guards keep it quiet: a minimum call count, so a 1-of-2 failure is not reported as a
+50% error rate; and per-condition suppression inside the window, so a loop emits one
+finding instead of one per iteration.
+
+Latency is always compared against the tool's own history, never a global threshold — a
+tool that always takes 30 seconds is not slow, it is that tool.
+
+## The LLM judge
+
+Integrity findings are optionally forwarded to `kamsd` for asynchronous enrichment by
+Claude on Bedrock. Three deliberate constraints:
+
+- It is **structurally incapable of changing a verdict.** Severity and action are already
+  decided by the time enrichment runs.
+- It is **never in the request path.** The shim fires and forgets; a model call takes
+  seconds and the shim dies when the agent disconnects.
+- Its queue is **bounded at 256 and drops oldest-first.** Under a flood the useful response
+  is to keep enriching recent findings, not to grow memory or block the handler feeding it.
+
+Enrichment spans attach to the originating trace with a **link**, not as a child.

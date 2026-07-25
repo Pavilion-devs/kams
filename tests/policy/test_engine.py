@@ -11,7 +11,7 @@ import yaml
 
 from kams.detect.base import Finding, FindingKind, Severity
 from kams.policy.engine import PolicyEngine
-from kams.policy.model import Action, Policy, parse_duration
+from kams.policy.model import Action, Policy, parse_duration, parse_rate
 
 
 class FakeClock:
@@ -72,6 +72,20 @@ class TestDuration:
     def test_rejects_nonsense(self):
         with pytest.raises(ValueError):
             parse_duration("soon")
+
+
+class TestRate:
+    @pytest.mark.parametrize("text,expected", [
+        ("4/min", (4, 60.0)),
+        ("2/second", (2, 1.0)),
+        ("10/hour", (10, 3600.0)),
+    ])
+    def test_parses(self, text, expected):
+        assert parse_rate(text) == expected
+
+    def test_rejects_missing_rate_on_rate_limit_rule(self):
+        with pytest.raises(ValueError, match="bad rate"):
+            Policy.parse({"rules": [{"name": "r", "action": "rate_limit"}]})
 
 
 class TestMatching:
@@ -150,6 +164,30 @@ class TestEnforcement:
         msg = engine.check("notes-mcp", "save_note").message
         assert "quarantine-critical" in msg
         assert "pinned definition poisoned" in msg
+
+    def test_rate_limit_allows_budget_then_blocks_and_recovers(self):
+        clock = FakeClock()
+        policy = Policy.parse({
+            "rules": [{
+                "name": "slow-retries",
+                "match": {"detector": "behavioural.retry_storm"},
+                "action": "rate_limit",
+                "rate": "2/min",
+                "ttl": "10m",
+            }]
+        })
+        engine = PolicyEngine(policy, clock=clock)
+        retry = finding(
+            kind=FindingKind.BEHAVIOURAL_THRASH,
+            detector="behavioural.retry_storm",
+        )
+        engine.apply(engine.evaluate([retry]))
+
+        assert engine.check("notes-mcp", "save_note").allowed is True
+        assert engine.check("notes-mcp", "save_note").allowed is True
+        assert engine.check("notes-mcp", "save_note").allowed is False
+        clock.advance(61)
+        assert engine.check("notes-mcp", "save_note").allowed is True
 
 
 class TestTTL:

@@ -1,0 +1,170 @@
+export const metadata = {
+  title: "CLI reference",
+  description:
+    "Every Kams command and flag: shim, proxy, pin, status, daemon, plus the two demo entry points.",
+};
+
+<Eyebrow>Reference</Eyebrow>
+
+# CLI reference
+
+<Lede>
+Five subcommands and two demo entry points. Everything writes to stderr, because stdout is
+the MCP wire.
+</Lede>
+
+## Commands at a glance
+
+| Command | Purpose |
+|---|---|
+| `kams shim` | Wrap a stdio MCP server |
+| `kams proxy` | Reverse-proxy a streamable-HTTP MCP server |
+| `kams pin` | Promote recorded definitions to pinned |
+| `kams status` | Show trust state and standing restrictions |
+| `kams daemon` | Run the control plane (webhook + enrichment) |
+| `kams-demo-agent` | Real Amazon Bedrock agent loop |
+| `kams-demo-alert` | External control-loop proof |
+
+## `kams shim`
+
+```bash
+kams shim [options] -- <upstream command...>
+```
+
+Everything after `--` is launched as a child process. See
+[stdio shim](/docs/integrations/stdio).
+
+| Flag | Default |
+|---|---|
+| `--server` | upstream binary basename |
+| `--lock` | `kams.lock` |
+| `--policy` | `policy.yaml` |
+| `--state` | `kams-state.json` |
+| `--kamsd` | `http://127.0.0.1:8787/findings` |
+| `--otlp-endpoint` | SigNoz local default |
+| `--log-level` | `warning` (or `KAMS_LOG_LEVEL`) |
+| `--no-telemetry` | off — pure relay, emits nothing |
+| `--no-enforce` | off — observe only |
+| `--no-reflex` | off — permissive policy, still honours SigNoz state |
+| `--no-integrity` | off |
+| `--no-egress` | off |
+| `--no-behavioural` | off |
+| `--no-forward` | off — do not send findings to `kamsd` |
+
+## `kams proxy`
+
+```bash
+kams proxy --upstream http://localhost:8000/mcp --server signoz-mcp --port 8900
+```
+
+See [Streamable HTTP](/docs/integrations/http).
+
+| Flag | Default |
+|---|---|
+| `--upstream` | **required** |
+| `--server` | derived from upstream hostname |
+| `--host` | `127.0.0.1` |
+| `--port` | `8900` |
+| `--path` | `/mcp` |
+| `--log-level` | `info` |
+
+All the detector, policy, lock, state, and OTLP flags from `shim` apply identically.
+
+## `kams pin`
+
+```bash
+kams pin notes-mcp     # one server
+kams pin               # every recorded server
+```
+
+Turns trust-on-first-use into an assertion. After pinning, any change to a tool's name,
+description, or schema is a finding at full severity — which is what makes a rug pull
+visible.
+
+| Flag | Default |
+|---|---|
+| `server` | positional; omit to pin all |
+| `--lock` | `kams.lock` |
+
+Exits non-zero if the lockfile is empty (run the shim once first) or the named server is
+unknown.
+
+## `kams status`
+
+```bash
+kams status
+```
+
+```text
+notes-mcp                pinned       2 tools
+    list_notes           4e91ab77c2d10f38
+    save_note            a3f1c8905e4b7d21
+
+standing restrictions
+    notes-mcp            quarantine_server  [signoz:Kams — MCP tool definition
+                         poisoned (CRITICAL)] via signoz, 3218s left
+```
+
+Forces a fresh read of shared state rather than using the one-second cache.
+
+| Flag | Default |
+|---|---|
+| `--lock` | `kams.lock` |
+| `--state` | `kams-state.json` |
+
+## `kams daemon`
+
+```bash
+kams daemon --port 8787 --ttl 1h
+```
+
+Runs the control plane: the SigNoz webhook receiver and the optional LLM enrichment worker.
+Not on the request path — a missing daemon degrades alert-driven policy without breaking
+MCP traffic.
+
+| Flag | Default |
+|---|---|
+| `--port` | `8787` |
+| `--state` | `kams-state.json` |
+| `--ttl` | `1h` — how long an alert-driven quarantine lasts |
+| `--no-judge` | off — disable LLM enrichment |
+| `--otlp-endpoint` | SigNoz local default |
+| `--log-level` | `info` |
+
+## `kams-demo-agent`
+
+```bash
+kams-demo-agent
+```
+
+<Callout type="warning" title="Makes live provider calls">
+Requires `AMAZON_BEDROCK_API_KEY`; model and region are configurable in `.env`. May incur
+charges.
+</Callout>
+
+Calls Bedrock Converse, executes the model's selected MCP tool through Kams, feeds the
+resulting policy error back into the conversation, and reconciles estimated result cost
+against the provider-reported input-token delta. It is not a playback.
+
+## `kams-demo-alert`
+
+```bash
+kams-demo-alert
+```
+
+The judge-proof command. Runs with `--no-reflex`, waits for Foundry's alert evaluator, and
+**fails** unless the saved restriction has `origin=signoz` and the next MCP call is blocked.
+Allow up to five minutes.
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Success |
+| `1` | Usage error, unknown server, or a failed proof assertion |
+
+## Logging
+
+Every command logs to **stderr** with the format `kams LEVEL logger: message`. Set the
+level with `--log-level` or `KAMS_LOG_LEVEL`; `--log-level debug` adds per-message
+correlation detail useful when a span is not closing as expected.

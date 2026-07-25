@@ -8,8 +8,11 @@
     { "i": "latency", "x": 6, "y": 0, "w": 6, "h": 6 },
     { "i": "errors", "x": 0, "y": 6, "w": 6, "h": 6 },
     { "i": "integrity", "x": 6, "y": 6, "w": 6, "h": 6 },
-    { "i": "enforcement", "x": 0, "y": 12, "w": 6, "h": 6 },
-    { "i": "findings", "x": 6, "y": 12, "w": 6, "h": 6 }
+    { "i": "cost", "x": 0, "y": 12, "w": 6, "h": 6 },
+    { "i": "egress", "x": 6, "y": 12, "w": 6, "h": 6 },
+    { "i": "enforcement", "x": 0, "y": 18, "w": 6, "h": 6 },
+    { "i": "findings", "x": 6, "y": 18, "w": 6, "h": 6 },
+    { "i": "logs", "x": 0, "y": 24, "w": 12, "h": 6 }
   ],
   "widgets": [
     {
@@ -40,7 +43,7 @@
               "legend": "{{server}}",
               "limit": 100,
               "having": [],
-              "orderBy": [{ "columnName": "A", "order": "desc" }]
+              "orderBy": [{ "columnName": "__result", "order": "desc" }]
             }
           ]
         }
@@ -74,7 +77,7 @@
               "legend": "{{server}}",
               "limit": 100,
               "having": [],
-              "orderBy": [{ "columnName": "A", "order": "desc" }]
+              "orderBy": [{ "columnName": "__result", "order": "desc" }]
             }
           ]
         }
@@ -111,7 +114,7 @@
               "legend": "{{server}} · {{tool}}",
               "limit": 100,
               "having": [],
-              "orderBy": [{ "columnName": "A", "order": "desc" }]
+              "orderBy": [{ "columnName": "__result", "order": "desc" }]
             }
           ]
         }
@@ -148,7 +151,7 @@
               "legend": "{{severity}} · {{server}}",
               "limit": 100,
               "having": [],
-              "orderBy": [{ "columnName": "A", "order": "desc" }]
+              "orderBy": [{ "columnName": "__result", "order": "desc" }]
             }
           ]
         }
@@ -156,8 +159,8 @@
     },
     {
       "id": "enforcement",
-      "title": "Enforcement actions by rule",
-      "description": "What Kams actually did, and which policy rule decided it. This is the 'own them' half of the theme.",
+      "title": "Control loop: enforcement by origin",
+      "description": "What Kams did and whether the reflex detector or a SigNoz alert installed the restriction.",
       "panelTypes": "graph",
       "query": {
         "queryType": "builder",
@@ -180,12 +183,13 @@
               "filter": { "expression": "" },
               "groupBy": [
                 { "key": "action", "dataType": "string", "type": "tag" },
-                { "key": "rule", "dataType": "string", "type": "tag" }
+                { "key": "rule", "dataType": "string", "type": "tag" },
+                { "key": "origin", "dataType": "string", "type": "tag" }
               ],
-              "legend": "{{action}} · {{rule}}",
+              "legend": "{{origin}} · {{action}} · {{rule}}",
               "limit": 100,
               "having": [],
-              "orderBy": [{ "columnName": "A", "order": "desc" }]
+              "orderBy": [{ "columnName": "__result", "order": "desc" }]
             }
           ]
         }
@@ -209,7 +213,7 @@
               "disabled": false,
               "aggregations": [
                 {
-                  "metricName": "mcp.integrity.drift.count",
+                  "metricName": "kams.finding.count",
                   "timeAggregation": "increase",
                   "spaceAggregation": "sum"
                 }
@@ -219,7 +223,114 @@
               "legend": "{{detector}}",
               "limit": 100,
               "having": [],
-              "orderBy": [{ "columnName": "A", "order": "desc" }]
+              "orderBy": [{ "columnName": "__result", "order": "desc" }]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "cost",
+      "title": "MCP context cost by server",
+      "description": "p95 model-context tokens caused by tool results. Estimated and Bedrock-reconciled values stay distinguishable.",
+      "panelTypes": "graph",
+      "query": {
+        "queryType": "builder",
+        "builder": {
+          "queryFormulas": [],
+          "queryData": [
+            {
+              "queryName": "A",
+              "dataSource": "metrics",
+              "expression": "A",
+              "stepInterval": 60,
+              "disabled": false,
+              "aggregations": [
+                {
+                  "metricName": "mcp.context.cost.tokens.bucket",
+                  "timeAggregation": "",
+                  "spaceAggregation": "p95"
+                }
+              ],
+              "filter": { "expression": "" },
+              "groupBy": [
+                { "key": "server", "dataType": "string", "type": "tag" },
+                { "key": "estimated", "dataType": "string", "type": "tag" }
+              ],
+              "legend": "{{server}} · estimated={{estimated}}",
+              "limit": 100,
+              "having": [],
+              "orderBy": [{ "columnName": "__result", "order": "desc" }]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "egress",
+      "title": "Sensitive egress by class",
+      "description": "Credential and PII classes Kams saw crossing into MCP servers; values are never recorded.",
+      "panelTypes": "graph",
+      "query": {
+        "queryType": "builder",
+        "builder": {
+          "queryFormulas": [],
+          "queryData": [
+            {
+              "queryName": "A",
+              "dataSource": "metrics",
+              "expression": "A",
+              "stepInterval": 60,
+              "disabled": false,
+              "aggregations": [
+                {
+                  "metricName": "mcp.egress.classified.count",
+                  "timeAggregation": "increase",
+                  "spaceAggregation": "sum"
+                }
+              ],
+              "filter": { "expression": "" },
+              "groupBy": [
+                { "key": "server", "dataType": "string", "type": "tag" },
+                { "key": "class", "dataType": "string", "type": "tag" }
+              ],
+              "legend": "{{server}} · {{class}}",
+              "limit": 100,
+              "having": [],
+              "orderBy": [{ "columnName": "__result", "order": "desc" }]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "logs",
+      "title": "Kams finding and enforcement logs",
+      "description": "Real OTLP logs correlated to the active trace and span, not console text copied into a dashboard.",
+      "panelTypes": "graph",
+      "query": {
+        "queryType": "builder",
+        "builder": {
+          "queryFormulas": [],
+          "queryData": [
+            {
+              "queryName": "A",
+              "dataSource": "logs",
+              "expression": "A",
+              "stepInterval": 60,
+              "disabled": false,
+              "aggregations": [{ "expression": "count()" }],
+              "filter": {
+                "expression": "service.name = 'kams-shim' OR service.name = 'kamsd'"
+              },
+              "groupBy": [
+                { "key": "severity_text", "dataType": "string", "type": "tag" },
+                { "key": "service.name", "dataType": "string", "type": "resource" }
+              ],
+              "legend": "{{service.name}} · {{severity_text}}",
+              "limit": 100,
+              "having": [],
+              "orderBy": []
             }
           ]
         }

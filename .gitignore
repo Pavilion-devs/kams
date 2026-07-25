@@ -18,16 +18,44 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
 *.egg-info/
 dist/
 build/
 
+# Node / Next.js
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
 # macOS
 .DS_Store
-docs/examples/  # foundryctl gen examples output — reference only, not ours
+
+# Local/generated documentation output
+# `foundryctl gen examples` output is reference material, not Kams source.
+docs/examples/
+
+# Local runtime state
 kams-state.json
 .kams-salt
 
 # Our own test runs regenerate this. In real use you COMMIT your kams.lock —
 # it is the pinned tool-definition lockfile and belongs in review.
 kams.lock
+
+# Hackathon production workspace. Source code, public docs, screenshots, and
+# article assets live elsewhere in this repository; raw recordings, previews,
+# render caches, and final exports stay local.
+video/
+
+# Internal build/submission notes
+plan.md
+
+# Superseded, unreferenced blog image exports. The article uses the optimized
+# editorial JPEGs in blog/assets/editorial/.
+blog/assets/*.png
+blog/assets/editorial/*.png

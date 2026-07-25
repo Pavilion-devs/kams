@@ -1,0 +1,109 @@
+export const metadata = {
+  title: "Streamable HTTP",
+  description:
+    "Reverse-proxy a streamable-HTTP MCP endpoint through the same detector pipeline the stdio shim uses, including SSE and concurrent clients.",
+};
+
+<Eyebrow>Integrations</Eyebrow>
+
+# Streamable HTTP
+
+<Lede>
+Point the agent at Kams instead of the upstream address. Same detectors, same policy, same
+telemetry — a different I/O adapter.
+</Lede>
+
+## Run the proxy
+
+```bash
+kams proxy \
+  --upstream http://localhost:8000/mcp \
+  --server signoz-mcp \
+  --port 8900
+```
+
+Then change the agent's endpoint from `http://localhost:8000/mcp` to
+`http://127.0.0.1:8900/mcp`. Nothing else in the agent changes.
+
+If `--server` is omitted, the logical name is derived from the upstream hostname with dots
+replaced by hyphens.
+
+## Why it shares the interceptor
+
+`_build_pipeline()` constructs the detectors and policy engine once, and both transports
+receive the identical object graph.
+
+<Callout type="note" title="This is a security property, not a tidiness one">
+A detector wired into stdio but forgotten on HTTP would be a silent hole that no test would
+notice. Sharing the pipeline makes that class of bug structurally impossible rather than
+merely unlikely.
+</Callout>
+
+The only transport-specific behaviour is I/O and the `network.transport` attribute, which
+is `tcp` here and `pipe` on stdio.
+
+## Concurrent clients and JSON-RPC IDs
+
+This is the hard part of an HTTP MCP proxy, and it is worth being explicit about.
+
+JSON-RPC IDs are only unique **within a connection**. Two independent clients will both
+happily send `id: 1`. Correlating spans by ID alone means one client's response closes the
+other client's span — silently producing wrong traces and wrong latencies.
+
+Kams assigns a distinct correlation token to every request and keys pending spans on
+`(token, jsonrpc_id)`:
+
+```python
+@staticmethod
+def _message_key(msg: Message) -> tuple[str, str | int | None]:
+    return str(msg.context.get("kams.correlation", "")), msg.id
+```
+
+The test suite covers exactly this: two concurrent clients reusing the same ID, asserting
+each receives its own response and each span closes against its own request.
+
+## SSE
+
+Streamable HTTP responses may be `text/event-stream`. Kams parses SSE frames to find
+JSON-RPC messages, and forwards the stream through without buffering it into a single
+response — a proxy that buffered would break incremental delivery, which is the entire
+point of the transport.
+
+Headers are passed through, and the golden HTTP transparency tests assert that plus status
+codes and error bodies.
+
+## Flags
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--upstream` | **required** | Upstream MCP endpoint |
+| `--server` | derived from hostname | Logical name on all telemetry |
+| `--host` | `127.0.0.1` | Bind address |
+| `--port` | `8900` | Bind port |
+| `--path` | `/mcp` | Path the proxy serves on |
+| `--lock` | `kams.lock` | Pinned definition store |
+| `--policy` | `policy.yaml` | Rule file |
+| `--state` | `kams-state.json` | Shared restriction file |
+| `--otlp-endpoint` | SigNoz local | OTLP gRPC target |
+| `--log-level` | `info` | Or `KAMS_LOG_LEVEL` |
+| `--no-enforce` / `--no-reflex` | off | As per the stdio shim |
+| `--no-integrity` / `--no-egress` / `--no-behavioural` | off | Disable a detector family |
+| `--no-forward` | off | Do not forward findings to `kamsd` |
+
+<Callout type="warning" title="Bind address">
+The default `127.0.0.1` is intentional. Exposing the proxy on `0.0.0.0` places an
+unauthenticated MCP endpoint on the network — do it only behind something that
+authenticates.
+</Callout>
+
+## Long-running process concerns
+
+Unlike a shim, a proxy outlives many agent sessions. Two consequences are handled
+explicitly:
+
+- **Baselines persist immediately** after each `tools/list` rather than at shutdown, so a
+  crash cannot lose a learned definition.
+- **Counters use delta temporality**, matching the short-lived shim, so a restart does not
+  produce a cumulative-reset artifact in SigNoz.
+
+Next: wiring the [SigNoz](/docs/integrations/signoz) dashboard, alert, and webhook.

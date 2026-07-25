@@ -1,0 +1,126 @@
+export const metadata = {
+  title: "stdio shim",
+  description:
+    "Wrap any stdio MCP server with a one-line change to an existing agent config. No SDK, no agent code change.",
+};
+
+<Eyebrow>Integrations</Eyebrow>
+
+# stdio shim
+
+<Lede>
+Adoption is a one-line change in an existing MCP config: replace the server's `command`
+with `kams shim -- <original command>`.
+</Lede>
+
+## Wrap a server
+
+<CodeGroup>
+```jsonc title="Claude Desktop / Cursor"
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "kams",
+      "args": [
+        "shim", "--server", "filesystem", "--",
+        "npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"
+      ]
+    }
+  }
+}
+```
+
+```bash title="Shell"
+kams shim --server filesystem -- \
+  npx -y @modelcontextprotocol/server-filesystem /tmp
+```
+</CodeGroup>
+
+Everything after `--` is the upstream command, launched as a child process. Kams relays
+stdin and stdout between the agent and that child, inspecting as it goes.
+
+<Callout type="note" title="stdout is the wire">
+Kams logs exclusively to **stderr**. stdout carries nothing but MCP protocol bytes, because
+a single stray line there would corrupt the JSON-RPC stream.
+</Callout>
+
+If `--server` is omitted, the logical name defaults to the basename of the upstream
+binary. Naming it explicitly is worth doing — the name appears on every span, metric label,
+finding, and restriction.
+
+## What happens on the wire
+
+```text
+agent stdin  ──▶ Kams ──▶ child stdin
+agent stdout ◀── Kams ◀── child stdout
+                  │
+                  ├─ span per request/response pair
+                  ├─ detectors on tools/list and tools/call
+                  └─ OTLP to SigNoz
+```
+
+Original JSON bytes are forwarded unmodified unless Kams injects trace context into
+`params._meta` or applies a redaction. `network.transport` is reported as `pipe`.
+
+Golden tests assert byte identity in observation-only mode across message ordering,
+Unicode, 200 KB payloads, and error responses.
+
+## First run, then pin
+
+```bash
+# 1. run once so Kams records the definitions
+kams shim --server filesystem -- npx -y @modelcontextprotocol/server-filesystem /tmp
+
+# 2. review what it recorded
+kams status
+
+# 3. turn the recording into an assertion
+kams pin filesystem
+```
+
+Until you pin, the baseline is **provisional** and drift is reported at reduced severity —
+Kams remembers what it saw, but nobody vouched for it. See
+[Tool-definition integrity](/docs/integrity).
+
+## Flags
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--server` | upstream binary name | Logical name on all telemetry |
+| `--lock` | `kams.lock` | Pinned definition store |
+| `--policy` | `policy.yaml` | Rule file; missing file means permissive |
+| `--state` | `kams-state.json` | Shared restriction file |
+| `--otlp-endpoint` | SigNoz local | OTLP gRPC target |
+| `--log-level` | `warning` | Or `KAMS_LOG_LEVEL` |
+| `--no-enforce` | off | Observe only; policy engine not built |
+| `--no-reflex` | off | Permissive policy, still honours SigNoz state |
+| `--no-integrity` | off | Disable the integrity detector |
+| `--no-egress` | off | Disable sensitive-data classification |
+| `--no-behavioural` | off | Disable thrash / retry-storm / latency checks |
+| `--no-forward` | off | Do not send findings to `kamsd` for enrichment |
+| `--no-telemetry` | off | Pure relay; emits nothing |
+| `--kamsd` | `http://127.0.0.1:8787/findings` | Enrichment endpoint |
+
+<Callout type="tip" title="`--no-telemetry` is the transparency harness">
+It reduces Kams to a byte relay with no spans, no detectors, and no policy. The golden wire
+tests run against it to prove the relay itself is faithful before any inspection is layered
+on.
+</Callout>
+
+## Baseline persistence
+
+The lockfile is written when a `tools/list` response is processed, not only at shutdown. A
+long-running session would otherwise hold a learned baseline in memory indefinitely and
+lose it on a crash.
+
+If the file cannot be written, Kams prints to stderr and continues — a read-only working
+directory degrades integrity detection to in-memory only rather than stopping the agent.
+
+## Lifecycle
+
+On shutdown, any request whose response never arrived has its span closed with
+`kams.response.missing=true` and an error status. Leaving them open would mean they are
+never exported and the calls vanish from the trace — the opposite of what an observability
+tool should do when something goes wrong.
+
+Next: the same pipeline over [streamable HTTP](/docs/integrations/http).

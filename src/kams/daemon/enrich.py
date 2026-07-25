@@ -122,9 +122,9 @@ class Enricher:
         attributes: dict[str, Any] = {
             sc.KAMS_FINDING_DETECTOR: job.detector,
             sc.KAMS_FINDING_SEVERITY: job.severity,
-            sc.MCP_SERVER_NAME: job.server,
+            sc.KAMS_SERVER_NAME: job.server,
             "kams.judge.available": verdict is not None,
-            **({sc.MCP_TOOL_NAME: job.tool} if job.tool else {}),
+            **({sc.GEN_AI_TOOL_NAME: job.tool} if job.tool else {}),
             **(verdict.to_attributes() if verdict else {}),
         }
         with self._tracer.start_as_current_span(

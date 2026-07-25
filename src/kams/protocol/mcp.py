@@ -29,15 +29,12 @@ INSPECTED_METHODS = frozenset(
     {INITIALIZE, TOOLS_LIST, TOOLS_CALL, RESOURCES_LIST, RESOURCES_READ, PROMPTS_LIST, PROMPTS_GET}
 )
 
-# W3C trace context key inside `params._meta`.
-#
-# MCP has no defined mechanism for propagating trace context -- there are no
-# headers in stdio. The spec reserves `_meta` for out-of-band metadata, so we
-# use it. This is a PROPOSAL, shipped alongside the semconv contribution rather
-# than an existing standard, and is documented as such in architecture.md §5.
+# W3C context inside ``params._meta``.  This is the MCP propagation mechanism
+# described by OpenTelemetry SEP-414.
 META_KEY = "_meta"
 TRACEPARENT = "traceparent"
 TRACESTATE = "tracestate"
+BAGGAGE = "baggage"
 
 
 # --- tool definitions --------------------------------------------------------
@@ -146,7 +143,12 @@ def extract_result_text(result: Any) -> list[str]:
 # --- trace context in _meta ---------------------------------------------------
 
 
-def inject_trace_context(params: dict[str, Any], traceparent: str, tracestate: str | None = None) -> dict[str, Any]:
+def inject_trace_context(
+    params: dict[str, Any],
+    traceparent: str,
+    tracestate: str | None = None,
+    baggage: str | None = None,
+) -> dict[str, Any]:
     """Return a copy of `params` carrying W3C trace context in `_meta`.
 
     Copies rather than mutates: the caller owns whether the message becomes
@@ -157,40 +159,24 @@ def inject_trace_context(params: dict[str, Any], traceparent: str, tracestate: s
     meta[TRACEPARENT] = traceparent
     if tracestate:
         meta[TRACESTATE] = tracestate
+    if baggage:
+        meta[BAGGAGE] = baggage
     new[META_KEY] = meta
     return new
 
 
-def extract_trace_context(params: dict[str, Any]) -> tuple[str | None, str | None]:
+def extract_trace_context(params: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
     meta = params.get(META_KEY)
     if not isinstance(meta, dict):
-        return None, None
+        return None, None, None
     tp = meta.get(TRACEPARENT)
     ts = meta.get(TRACESTATE)
-    return (tp if isinstance(tp, str) else None, ts if isinstance(ts, str) else None)
-
-
-def strip_trace_context(params: dict[str, Any]) -> dict[str, Any]:
-    """Remove our keys before forwarding upstream.
-
-    Instrumentation must not change what the server receives. If `_meta` becomes
-    empty as a result, drop it entirely rather than forwarding `"_meta": {}`,
-    which a strict server could reject and which is observably different from
-    what the agent sent.
-    """
-    meta = params.get(META_KEY)
-    if not isinstance(meta, dict):
-        return params
-    if TRACEPARENT not in meta and TRACESTATE not in meta:
-        return params
-
-    new = dict(params)
-    cleaned = {k: v for k, v in meta.items() if k not in (TRACEPARENT, TRACESTATE)}
-    if cleaned:
-        new[META_KEY] = cleaned
-    else:
-        new.pop(META_KEY, None)
-    return new
+    bg = meta.get(BAGGAGE)
+    return (
+        tp if isinstance(tp, str) else None,
+        ts if isinstance(ts, str) else None,
+        bg if isinstance(bg, str) else None,
+    )
 
 
 # --- canonicalisation ---------------------------------------------------------

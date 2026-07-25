@@ -1,0 +1,160 @@
+export const metadata = {
+  title: "Telemetry & semconv",
+  description:
+    "Span names, MCP semantic-convention attributes, the metric contract, SEP-414 propagation, and correlated logs.",
+};
+
+<Eyebrow>Reference</Eyebrow>
+
+# Telemetry &amp; semconv
+
+<Lede>
+Kams implements the published OpenTelemetry MCP model rather than inventing one. Custom
+behaviour is namespaced `kams.*`.
+</Lede>
+
+## Spans
+
+One CLIENT span per request/response pair, named by the published convention:
+
+```text
+tools/list
+tools/call save_note
+initialize
+```
+
+### Attributes
+
+| Attribute | Example | Notes |
+|---|---|---|
+| `mcp.method.name` | `tools/call` | |
+| `mcp.session.id` | `9f2c1a4b7e0d5386` | From `_meta` when present |
+| `mcp.protocol.version` | `2025-06-18` | Learned from the `initialize` exchange |
+| `jsonrpc.request.id` | `7` | Stringified |
+| `rpc.response.status_code` | `-32602` | JSON-RPC error code |
+| `network.transport` | `pipe` / `tcp` | stdio / HTTP |
+| `error.type` | `-32602` | Unset on success |
+| `gen_ai.operation.name` | `execute_tool` | On `tools/call` only |
+| `gen_ai.tool.name` | `save_note` | |
+| `mcp.request.size` / `mcp.response.size` | `412` | Bytes on the wire |
+| `mcp.tool.count` | `2` | On `tools/list` |
+| `mcp.context.cost.tokens` | `1180` | |
+| `mcp.context.cost.estimated` | `true` | **Mandatory discriminator** |
+| `kams.baseline.state` | `pinned` | `pinned` / `provisional` / `first_sighting` |
+| `kams.trace.propagated` | `true` | Whether inbound context existed |
+
+<Callout type="note" title="Successful spans stay UNSET">
+OpenTelemetry represents a successful client span with an unset status, not `OK`. Kams
+follows that, so `OK` never appears and error queries stay meaningful.
+</Callout>
+
+### Enforcement spans
+
+A block emits `kams.enforce <action>` — a child of the active MCP span when one exists, or
+a standalone control-plane span when the webhook fires later.
+
+| Attribute | Example |
+|---|---|
+| `kams.enforce.action` | `quarantine_server` |
+| `kams.enforce.origin` | `reflex` / `signoz` |
+| `kams.enforce.ttl` | `3600` |
+| `kams.rule.name` | `quarantine-poisoned-pinned-definition` |
+| `kams.server.name` | `notes-mcp` |
+
+### Finding events
+
+Findings attach to the active span as **events**, not attributes — a single `tools/list`
+can produce several findings and attribute keys cannot repeat.
+
+```text
+kams.finding.integrity_drift
+  kams.finding.kind       = INTEGRITY_DRIFT
+  kams.finding.severity   = CRITICAL
+  kams.finding.detector   = integrity.definition_drift
+  kams.finding.confidence = 0.87
+  kams.finding.summary    = Tool 'save_note' description changed on a pinned…
+```
+
+## Metrics
+
+| Metric | Unit | Labels |
+|---|---|---|
+| `mcp.client.operation.duration` | `s` | server, method, tool |
+| `mcp.tool.call.count` | — | server, method, tool |
+| `mcp.tool.error.count` | — | server, method, tool |
+| `mcp.integrity.drift.count` | — | server, kind, severity, detector, baseline_state, tool |
+| `kams.finding.count` | — | as above |
+| `mcp.egress.classified.count` | — | server, class, tool |
+| `mcp.context.cost.tokens` | `{token}` | server, method, tool, estimated |
+| `kams.enforcement.count` | — | server, action, rule, origin |
+
+Two deliberate choices:
+
+- **Explicit buckets** on duration, so p95 is meaningful at MCP latencies rather than
+  landing in a default bucket sized for HTTP services.
+- **Delta temporality** on counters, because shims are short-lived and cumulative
+  temporality would produce reset artifacts on every agent disconnect.
+
+<Callout type="warning" title="One metric, one meaning">
+`mcp.integrity.drift.count` is incremented **only** by `integrity.definition_drift`. Every
+other finding family increments `kams.finding.count`. This is what allows the critical alert
+to be trusted — it cannot fire on the wrong condition.
+</Callout>
+
+## Trace propagation (SEP-414)
+
+MCP carries W3C trace context in `params._meta`. Kams extracts inbound context, starts its
+CLIENT span as a child, and reinjects the **new** context upstream:
+
+```jsonc
+{
+  "method": "tools/call",
+  "params": {
+    "name": "save_note",
+    "arguments": { "note": "buy milk" },
+    "_meta": {
+      "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+      "tracestate": "vendor=value",
+      "baggage": "deployment=prod",
+      "progressToken": 42
+    }
+  }
+}
+```
+
+`traceparent`, `tracestate`, and `baggage` are all preserved, and unrelated `_meta` keys such
+as `progressToken` are never dropped — the injection copies rather than mutates, so an
+accidental in-place edit cannot silently break byte-fidelity.
+
+When no inbound context exists, Kams starts a valid root span and records
+`kams.trace.propagated=false` rather than fabricating a parent.
+
+## Logs
+
+Python logging is exported over OTLP. Records emitted inside an active span arrive with
+non-empty `trace_id` and `span_id`, which is what makes the dashboard's log panel clickable
+through to the trace.
+
+```text
+kams.finding.kind      = INTEGRITY_DRIFT
+kams.finding.severity  = CRITICAL
+kams.finding.detector  = integrity.definition_drift
+kams.server.name       = notes-mcp
+gen_ai.tool.name       = save_note
+```
+
+Sensitive values are excluded at **finding construction time**, not filtered at export.
+
+## The semconv proposal
+
+`src/kams/semconv/mcp.yaml` deliberately proposes only the remaining gap — context-cost
+attribution — rather than redefining the existing MCP convention:
+
+| Attribute | Requirement |
+|---|---|
+| `mcp.context.cost.tokens` | Recommended |
+| `mcp.context.cost.estimated` | **Required** when tokens is present |
+
+The discriminator is mandatory by design. A cost metric that mixed estimates with
+provider-reported measurements without saying which is which would not be one anyone should
+trust.

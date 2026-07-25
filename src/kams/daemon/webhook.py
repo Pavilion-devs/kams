@@ -24,6 +24,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from kams.daemon.state import SharedState, StoredRestriction
+from kams.telemetry import semconv as sc
+from kams.telemetry import tracing
 
 log = logging.getLogger("kams.webhook")
 
@@ -33,6 +35,50 @@ DEFAULT_PORT = 8787
 # fleet-scale signal can be transient, and an unbounded block from a flapping
 # alert is its own outage.
 DEFAULT_TTL = 3600.0
+_CONTROL_COUNTER = None
+
+
+def _emit_quarantine(server: str, rule: str, reason: str, ttl: float) -> None:
+    """Emit the SigNoz→Kams control action as a trace, metric, and OTLP log."""
+    global _CONTROL_COUNTER
+    tracer = tracing.tracer("kams.daemon.webhook")
+    if _CONTROL_COUNTER is None:
+        _CONTROL_COUNTER = tracing.meter("kams.daemon.webhook").create_counter(
+            sc.METRIC_ENFORCEMENT,
+            description="Policy enforcement actions taken",
+        )
+    with tracer.start_as_current_span(
+        "kams.enforce quarantine_server",
+        attributes={
+            sc.KAMS_ENFORCE_ACTION: "quarantine_server",
+            sc.KAMS_RULE_NAME: rule,
+            sc.KAMS_SERVER_NAME: server,
+            sc.KAMS_ENFORCE_ORIGIN: "signoz",
+            sc.KAMS_ENFORCE_TTL: int(ttl),
+        },
+    ):
+        _CONTROL_COUNTER.add(
+            1,
+            {
+                "server": server,
+                "action": "quarantine_server",
+                "rule": rule,
+                "origin": "signoz",
+            },
+        )
+        log.warning(
+            "quarantined %s via %s (ttl %ds): %s",
+            server,
+            rule,
+            int(ttl),
+            reason,
+            extra={
+                "kams.server.name": server,
+                "kams.rule.name": rule,
+                "kams.enforce.action": "quarantine_server",
+                "kams.enforce.origin": "signoz",
+            },
+        )
 
 
 def extract_server(payload: dict[str, Any]) -> str | None:
@@ -127,19 +173,20 @@ class _Handler(BaseHTTPRequestHandler):
 
         rule = extract_rule(payload)
         now = time.time()
+        reason = _reason(payload)
         self.state.add(
             StoredRestriction(
                 action="quarantine_server",
                 server=server,
                 tool=None,
                 rule=rule,
-                reason=_reason(payload),
+                reason=reason,
                 created_at=now,
                 expires_at=now + self.ttl,
                 origin="signoz",
             )
         )
-        log.warning("quarantined %s via %s (ttl %ds)", server, rule, int(self.ttl))
+        _emit_quarantine(server, rule, reason, self.ttl)
         self._reply(200, {"status": "quarantined", "server": server, "rule": rule})
 
     def _handle_finding(self) -> None:

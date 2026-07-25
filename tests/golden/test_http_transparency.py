@@ -141,6 +141,64 @@ class TestTransparency:
         r = await _post(proxied, "http://proxy/mcp", {"jsonrpc": "2.0", "id": 7, "method": "experimental/x"})
         assert r.json()["result"] == {"ok": True}
 
+    async def test_concurrent_clients_with_same_jsonrpc_id_do_not_cross_wire(self):
+        """HTTP request correlation is connection-safe, not keyed by id alone."""
+        async def echo(request):
+            payload = await request.json()
+            marker = payload["params"]["marker"]
+            if marker == "slow":
+                await asyncio.sleep(0.05)
+            return Response(
+                content=json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": payload["id"],
+                    "result": {"marker": marker},
+                }),
+                media_type="application/json",
+            )
+
+        client_markers: dict[str, str] = {}
+        observed: list[tuple[str, str]] = []
+
+        async def on_client(msg):
+            client_markers[msg.context["kams.correlation"]] = msg.params["marker"]
+            return HookResult.forward()
+
+        async def on_server(msg):
+            correlation = msg.context["kams.correlation"]
+            observed.append((client_markers[correlation], msg.result["marker"]))
+            return HookResult.forward()
+
+        echo_app = Starlette(routes=[Route("/mcp", echo, methods=["POST"])])
+        r = HttpRelay(
+            "http://upstream/mcp",
+            on_client_message=on_client,
+            on_server_message=on_server,
+        )
+        r._client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=echo_app),
+            base_url="http://upstream",
+        )
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=r.app()),
+            base_url="http://proxy",
+        )
+        slow, fast = await asyncio.gather(
+            _post(client, "http://proxy/mcp", {
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"marker": "slow"},
+            }),
+            _post(client, "http://proxy/mcp", {
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"marker": "fast"},
+            }),
+        )
+        await client.aclose()
+
+        assert slow.json()["result"]["marker"] == "slow"
+        assert fast.json()["result"]["marker"] == "fast"
+        assert sorted(observed) == [("fast", "fast"), ("slow", "slow")]
+
 
 @pytest.mark.asyncio
 class TestSSE:

@@ -51,6 +51,9 @@ class StoredRestriction:
     # webhook). Kept so the enforcement span can say where the decision came
     # from, which is the whole point of having two paths.
     origin: str = "reflex"
+    # Present only for rate_limit restrictions; absent in version-1 files is
+    # intentionally backward compatible.
+    rate: str | None = None
 
     def expired(self, now: float) -> bool:
         return self.expires_at is not None and now >= self.expires_at

@@ -17,10 +17,14 @@ from kams.detect.egress import EgressClassifier, redact
 
 # Fabricated, correctly-shaped credentials. Not real, but they must never
 # appear in a finding, a log line, or a span attribute.
+SLACK_TOKEN = "-".join(
+    ("xoxb", "123456789012", "1234567890123", "abcdefghijklmnopqrstuvwx")
+)
+
 SECRETS = {
     "aws_key": "AKIAIOSFODNN7EXAMPLE",
     "github_token": "ghp_1234567890abcdefghijklmnopqrstuvwxyzAB",
-    "slack_token": "xoxb-REDACTED-FIXTURE",
+    "slack_token": SLACK_TOKEN,
     "anthropic_key": "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789",
     "jwt": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
     "private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----",

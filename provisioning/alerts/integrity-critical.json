@@ -25,10 +25,14 @@
             ],
             "limit": 100,
             "order": [{ "key": { "name": "__result" }, "direction": "desc" }],
-            "filter": { "expression": "severity = 'CRITICAL'" },
+            "filter": {
+              "expression": "severity = 'CRITICAL' AND kind = 'INTEGRITY_DRIFT' AND detector = 'integrity.definition_drift' AND baseline_state = 'pinned'"
+            },
             "groupBy": [
               { "name": "server", "fieldContext": "attribute", "fieldDataType": "string" },
-              { "name": "severity", "fieldContext": "attribute", "fieldDataType": "string" }
+              { "name": "severity", "fieldContext": "attribute", "fieldDataType": "string" },
+              { "name": "detector", "fieldContext": "attribute", "fieldDataType": "string" },
+              { "name": "baseline_state", "fieldContext": "attribute", "fieldDataType": "string" }
             ],
             "legend": "{{server}}"
           }
@@ -51,11 +55,15 @@
   },
   "evaluation": {
     "kind": "rolling",
-    "spec": { "evalWindow": "5m", "frequency": "1m" }
+    "spec": { "evalWindow": "1m", "frequency": "1m" }
   },
   "notificationSettings": {
     "groupBy": ["server"],
-    "renotify": { "enabled": false }
+    "renotify": {
+      "enabled": true,
+      "interval": "1m",
+      "alertStates": ["firing"]
+    }
   },
   "labels": { "severity": "critical", "component": "kams" },
   "annotations": {

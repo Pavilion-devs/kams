@@ -53,6 +53,11 @@ def main(argv: list[str] | None = None) -> int:
     shim.add_argument("--no-egress", action="store_true", help="disable sensitive-data classification")
     shim.add_argument("--policy", default="policy.yaml", help="path to the policy file")
     shim.add_argument("--no-enforce", action="store_true", help="observe only; never block")
+    shim.add_argument(
+        "--no-reflex",
+        action="store_true",
+        help="do not install local restrictions; still honor SigNoz alert state",
+    )
     shim.add_argument("--state", default="kams-state.json",
                       help="shared enforcement state, written by kamsd and other shims")
 
@@ -84,6 +89,11 @@ def main(argv: list[str] | None = None) -> int:
                        help="disable thrash / retry-storm / latency detection")
     proxy.add_argument("--no-egress", action="store_true")
     proxy.add_argument("--no-enforce", action="store_true")
+    proxy.add_argument(
+        "--no-reflex",
+        action="store_true",
+        help="do not install local restrictions; still honor SigNoz alert state",
+    )
     proxy.add_argument("--log-level", default=os.environ.get("KAMS_LOG_LEVEL", "info"))
 
     pin = sub.add_parser(
@@ -117,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
     daemon.add_argument("--ttl", default="1h", help="how long an alert-driven quarantine lasts")
     daemon.add_argument("--no-judge", action="store_true",
                         help="disable LLM enrichment of integrity findings")
+    daemon.add_argument("--otlp-endpoint", default=None, help="OTLP gRPC endpoint")
     daemon.add_argument("--log-level", default=os.environ.get("KAMS_LOG_LEVEL", "info"))
 
     args = parser.parse_args(ours)
@@ -152,7 +163,7 @@ def _run_daemon(args) -> int:
     from kams.policy.model import parse_duration
     from kams.telemetry import tracing
 
-    tracing.setup("kamsd")
+    tracing.setup("kamsd", endpoint=args.otlp_endpoint)
     state = SharedState(args.state)
     ttl = parse_duration(args.ttl) or 3600.0
 
@@ -207,7 +218,13 @@ def _build_pipeline(args):
         from kams.policy.model import Policy
 
         try:
-            policy = Policy.load(args.policy) if os.path.exists(args.policy) else Policy.permissive()
+            policy = (
+                Policy.permissive()
+                if getattr(args, "no_reflex", False)
+                else Policy.load(args.policy)
+                if os.path.exists(args.policy)
+                else Policy.permissive()
+            )
         except Exception as exc:  # noqa: BLE001
             # A malformed policy must not stop the agent. Fall back to
             # observe-only and say so loudly (principle 1).

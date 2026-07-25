@@ -1,0 +1,128 @@
+export const metadata = {
+  title: "Overview",
+  description:
+    "Kams turns MCP into an observable dependency boundary: telemetry to SigNoz, pinned tool definitions, deterministic detection, and TTL-bound containment.",
+};
+
+<Eyebrow>Introduction</Eyebrow>
+
+# Kams
+
+<Lede>
+SigNoz-native observability and closed-loop containment for the Model Context Protocol.
+</Lede>
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="solar:rocket-2-linear" href="/docs/quickstart">
+    Bootstrap SigNoz, run the rug pull, watch the loop close.
+  </Card>
+  <Card title="How Kams works" icon="solar:routing-2-linear" href="/docs/how-it-works">
+    Intercept, observe, detect, alert, contain — end to end.
+  </Card>
+  <Card title="Architecture" icon="solar:diagram-up-linear" href="/docs/architecture">
+    The full runtime topology in one diagram.
+  </Card>
+  <Card title="CLI reference" icon="solar:command-linear" href="/docs/cli">
+    `shim`, `proxy`, `pin`, `status`, `daemon`.
+  </Card>
+</CardGroup>
+
+## The problem
+
+An MCP server does more than execute tools. Its **tool descriptions become instructions
+in your agent's context**, and its **arguments carry your data across a process
+boundary**. Both are trust decisions, and neither is usually observed.
+
+That creates a documented failure mode: a server behaves normally, earns trust, and
+later changes *only a description*. The tool's name, schema, and implementation stay
+byte-identical. The sentence your model reads does not. This is the **rug pull**, and
+nothing in a normal observability stack sees it, because from the outside the traffic
+looks completely healthy.
+
+<Callout type="note" title="The one rule">
+Observability must never be the reason an agent stops working. Every detector, the
+policy engine, and the shared-state reader all fail **open**. Quarantine is the single
+deliberate exception, and it is always explicit and always TTL-bound.
+</Callout>
+
+## What Kams does
+
+Kams sits transparently between an agent and its MCP servers — no SDK, no agent code
+change — and does five things:
+
+<CardGroup cols={2}>
+  <Card title="Emits real telemetry" icon="solar:chart-square-linear">
+    OpenTelemetry MCP traces, metrics, and correlated logs over OTLP, following the
+    published semantic conventions and SEP-414 propagation.
+  </Card>
+  <Card title="Pins tool definitions" icon="solar:pin-linear">
+    Every tool's `(name, description, inputSchema)` is canonicalised and digested into
+    `kams.lock`, so drift is a comparison and not a guess.
+  </Card>
+  <Card title="Detects deterministically" icon="solar:target-linear">
+    Definition drift, prompt-injection shapes, sensitive egress, context cost, and
+    unhealthy behaviour. Rules decide severity — not an LLM.
+  </Card>
+  <Card title="Closes the loop" icon="solar:refresh-circle-linear">
+    A SigNoz alert calls Kams back, writes shared policy state, and the next MCP tool
+    call is blocked with an explicit JSON-RPC error.
+  </Card>
+</CardGroup>
+
+## The loop
+
+```text
+agent ──MCP──▶ Kams ──MCP──▶ upstream server
+                │
+                └──OTLP──▶ SigNoz ──alert webhook──▶ Kams policy state
+                                                       │
+next tool call ◀────────────── explicit JSON-RPC block ┘
+```
+
+The differentiator is not "MCP security" in isolation. It is the complete observability
+loop: **MCP traffic → correlated evidence in SigNoz → alert evaluation → shared policy
+state → observable enforcement**.
+
+<ArchitectureDiagram framed className="my-8" />
+
+## Signals Kams produces
+
+| Signal | Emitted as | Notes |
+|---|---|---|
+| MCP operation latency | `mcp.client.operation.duration` | Explicit buckets, so p95 is meaningful at MCP latencies |
+| Tool volume and errors | `mcp.tool.call.count`, `mcp.tool.error.count` | Labelled by server, method, tool |
+| Definition drift | `mcp.integrity.drift.count` | **Only** definition drift, so the critical alert cannot misfire |
+| Every finding | `kams.finding.count` | All five detector families |
+| Sensitive egress | `mcp.egress.classified.count` | Class and destination, never the value |
+| Context cost | `mcp.context.cost.tokens` | Always carries an `estimated` discriminator |
+| Enforcement | `kams.enforcement.count` | Action, rule, and `reflex` / `signoz` origin |
+
+## Adoption surfaces
+
+<CardGroup cols={3}>
+  <Card title="stdio shim" icon="solar:command-linear" href="/docs/integrations/stdio">
+    One line in an existing MCP config.
+  </Card>
+  <Card title="Streamable HTTP" icon="solar:global-linear" href="/docs/integrations/http">
+    Reverse-proxy an HTTP MCP endpoint.
+  </Card>
+  <Card title="SigNoz" icon="solar:bell-linear" href="/docs/integrations/signoz">
+    Dashboard, alert, and webhook as code.
+  </Card>
+</CardGroup>
+
+Both transports share the same `Interceptor`, so a detector can never exist on stdio and
+silently not on HTTP.
+
+## Honest boundaries
+
+- Calls already pipelined before a restriction is installed cannot be recalled.
+- Tool-result token cost is **estimated** until an instrumented agent supplies a provider
+  usage delta. Estimated and reconciled values are always distinguishable.
+- The demo webhook assumes loopback or a trusted network and does not verify a signature.
+- Alert evaluation is intentionally slower than the local reflex path.
+
+<Callout type="tip" title="Next">
+Start with the [Quickstart](/docs/quickstart) to see the whole loop run on your machine
+in a few minutes, or read [How Kams works](/docs/how-it-works) for the concepts first.
+</Callout>

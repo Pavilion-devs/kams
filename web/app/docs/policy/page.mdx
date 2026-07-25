@@ -1,0 +1,165 @@
+export const metadata = {
+  title: "policy.yaml reference",
+  description:
+    "Ordered declarative rules: matchers, actions, TTLs, sliding-window rate limits, and the fail-open default.",
+};
+
+<Eyebrow>Policy</Eyebrow>
+
+# `policy.yaml` reference
+
+<Lede>
+Rules are evaluated in file order and the first match wins, so the file reads top to
+bottom exactly the way it executes.
+</Lede>
+
+<Callout type="note" title="Kams is fully useful with every rule deleted">
+Observation and enforcement are separate concerns. Findings that match no rule are still
+detected, still emitted as span events, still counted, and still logged. Policy only
+decides what to *do* about them.
+</Callout>
+
+## Shape
+
+```yaml
+version: 1
+
+defaults:
+  action: allow
+  fail_mode: open
+
+thresholds:
+  integrity.description_delta:
+    high: 0.55
+    medium: 0.30
+
+rules:
+  - name: quarantine-poisoned-pinned-definition
+    match:
+      kind: INTEGRITY_DRIFT
+      severity: [CRITICAL]
+      min_confidence: 0.6
+    action: quarantine_server
+    ttl: 1h
+    reason: >-
+      A pinned tool definition changed into text that reads as prompt injection.
+```
+
+Ordering is file order rather than a specificity or priority score. That is more
+predictable: an operator can reason about the file without running it.
+
+## Actions
+
+| Action | Enforcing | Scope | Effect |
+|---|:---:|---|---|
+| `allow` | – | – | Explicitly permit; stops rule evaluation |
+| `warn` | – | – | Record only. Nothing is enforced |
+| `redact_args` | ✓ | tool | Replace sensitive spans with typed placeholders |
+| `rate_limit` | ✓ | tool | Sliding window; requires `rate` |
+| `block_tool` | ✓ | tool | Reject calls to that tool |
+| `quarantine_server` | ✓ | **server** | Reject every call to the server |
+
+A quarantine deliberately covers the whole server (`tool` is set to `null`); every other
+action is scoped to the tool that triggered it.
+
+## Matchers
+
+Every field inside `match` is ANDed. An empty matcher matches everything.
+
+| Field | Type | Matches |
+|---|---|---|
+| `kind` | string / list | `INTEGRITY_DRIFT`, `INTEGRITY_INJECTION`, `EGRESS_SENSITIVE`, `COST_SPIKE`, `BEHAVIOURAL_THRASH`, `DETECTOR_ERROR` |
+| `detector` | string / list | Stable detector ID, e.g. `integrity.result_injection` |
+| `severity` | string / list | Exact severity membership |
+| `min_severity` | string | `severity >= X`, using `INFO < LOW < MEDIUM < HIGH < CRITICAL` |
+| `server` | string / list | Logical server name |
+| `tool` | string / list | Tool name |
+| `classes` | list | **Intersection** with `evidence.classes` (egress) |
+| `min_confidence` | float | `finding.confidence >= X` |
+
+### `unless`
+
+A second matcher that *excludes*. This is how destination-aware policy is written:
+
+```yaml
+- name: redact-pii-to-untrusted
+  match:
+    kind: EGRESS_SENSITIVE
+    classes: [email, phone]
+  unless:
+    server: [crm-mcp]
+  action: redact_args
+```
+
+<Callout type="warning" title="An empty `unless` is ignored">
+`unless: {}` would otherwise exclude everything, which is never what an operator means.
+</Callout>
+
+## Durations and rates
+
+`ttl` accepts `30s`, `15m`, `1h`, `7d`, or a bare number of seconds.
+
+`rate` is required for `rate_limit` and parses as `<count>/<unit>`, where unit is
+`s`/`sec`/`second`, `m`/`min`/`minute`, or `h`/`hour`:
+
+```yaml
+- name: throttle-retry-storm
+  match:
+    detector: behavioural.retry_storm
+    min_severity: HIGH
+  action: rate_limit
+  rate: 4/min
+  ttl: 10m
+```
+
+This is a **real sliding window**, not a fixed bucket: timestamps older than the window are
+evicted on each check, so a limit recovers gradually rather than resetting on a boundary.
+
+A malformed rate raises at load time rather than silently disabling the rule.
+
+## Fail open
+
+`fail_mode: open` is the default and encodes the project's first principle.
+
+- A malformed `policy.yaml` falls back to a permissive policy, printed loudly to stderr.
+- A rule that raises during evaluation is logged and skipped.
+- A detector that raises is logged and treated as producing no finding.
+- An unreadable shared-state file is treated as empty.
+
+<Callout type="danger" title="The one deliberate exception">
+Quarantine. It is always explicit, always attributable to a named rule, and always
+TTL-bound.
+</Callout>
+
+## The shipped default policy
+
+The rules Kams ships with, in order:
+
+| Rule | Match | Action |
+|---|---|---|
+| `quarantine-poisoned-pinned-definition` | Critical drift, confidence ≥ 0.6 | `quarantine_server` 1h |
+| `quarantine-homoglyph-squatting` | `integrity.tool_squatting` ≥ HIGH | `quarantine_server` 1h |
+| `block-tool-on-result-injection` | `integrity.result_injection` ≥ HIGH | `block_tool` 15m |
+| `warn-on-provisional-drift` | Drift at HIGH/MEDIUM | `warn` |
+| `block-credential-egress` | Credential classes, not `vault-mcp` | `block_tool` |
+| `redact-pii-to-untrusted` | `email`/`phone`, not `crm-mcp` | `redact_args` |
+| `throttle-retry-storm` | `behavioural.retry_storm` ≥ HIGH | `rate_limit 4/min` 10m |
+| `warn-on-agent-thrash` | `behavioural.thrash` | `warn` |
+| `warn-on-error-rate` | `behavioural.error_rate` | `warn` |
+| `throttle-context-cost-runaway` | `COST_SPIKE` ≥ HIGH | `rate_limit 6/min` 10m |
+
+Note what is deliberately *not* enforced. Agent thrash is a prompt or planning problem, not
+a server problem, so Kams reports rather than intervenes. And a failing dependency is
+throttled rather than blocked — the server may recover, and a TTL'd rate limit degrades
+gracefully where a block does not.
+
+## Loading
+
+```bash
+kams shim --policy ./policy.yaml -- <command>     # default: ./policy.yaml
+kams shim --no-enforce -- <command>               # observe only, no engine at all
+kams shim --no-reflex -- <command>                # permissive policy, still honours SigNoz
+```
+
+See [Shared state &amp; TTL](/docs/shared-state) for how installed restrictions are stored
+and expired.

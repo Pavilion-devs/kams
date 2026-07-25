@@ -45,6 +45,8 @@ class Message:
     payload: dict[str, Any] | None
     kind: MessageKind
     dirty: bool = field(default=False, repr=False)
+    # Transport-only correlation data. Never serialised onto the wire.
+    context: dict[str, Any] = field(default_factory=dict, repr=False)
 
     # ---- classification helpers -------------------------------------------------
 

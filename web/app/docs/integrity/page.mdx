@@ -1,0 +1,117 @@
+export const metadata = {
+  title: "Tool-definition integrity",
+  description:
+    "The rug pull, why a whole-response hash fails, and how pinning turns trust-on-first-use into a human assertion.",
+};
+
+<Eyebrow>Core concepts</Eyebrow>
+
+# Tool-definition integrity
+
+<Lede>
+The dangerous part of an MCP server may be the sentence your model reads. Kams makes that
+sentence a tracked, pinned artifact.
+</Lede>
+
+## The threat
+
+MCP tool descriptions are injected verbatim into the model's context. That makes them
+*executable instruction*, not documentation. A server can therefore:
+
+| Threat | Shape |
+|---|---|
+| **Rug pull** | A definition is swapped after trust is established |
+| **Tool poisoning** | Malicious instructions live inside a description |
+| **Cross-server shadowing** | One server describes behaviour for another server's tools |
+| **Tool squatting** | Homoglyph or near-miss names that render identically |
+
+In every case the tool's *code* may be unchanged. Only the advertised metadata moves.
+
+## Why not just hash the response
+
+The obvious approach — hash the whole `tools/list` response — does not survive contact
+with reality. Servers legitimately reorder tools, add tools, and bump versions, so a
+whole-response hash fires on every benign change.
+
+<Callout type="warning" title="An alert that fires constantly gets muted">
+And a muted alert is worse than no alert, because it creates the belief that something is
+being watched.
+</Callout>
+
+## What Kams does instead
+
+Each tool is canonicalised and digested **separately** over exactly the triple that can
+reach the model or constrain its calls:
+
+```text
+digest = sha256({
+  name,
+  description  → NFC-normalised, trimmed,
+  inputSchema  → recursively key-sorted,
+})
+```
+
+Formatting churn that cannot influence the model — key ordering, whitespace, tool
+ordering — is normalised away. Two sub-digests are kept alongside it so a *description*
+change can be told apart from a *schema* change, because those are different threats.
+
+<Callout type="danger" title="Invisible characters survive on purpose">
+Normalisation is NFC only. Zero-width and bidi codepoints are a real poisoning vector, so
+they must reach the digest and be caught by the detector. Stripping them here would hide
+exactly the attack Kams exists to find.
+</Callout>
+
+## Provisional vs pinned
+
+`kams.lock` distinguishes two very different states:
+
+<CardGroup cols={2}>
+  <Card title="Provisional" icon="solar:eye-linear">
+    Created on first sighting. Kams *remembers* what it saw, but nobody vouched for it.
+    Drift here is informational — severity is reduced by one level.
+  </Card>
+  <Card title="Pinned" icon="solar:pin-linear">
+    Created by `kams pin`. The definition is now a **human assertion**. Drift violates
+    something a person approved, so severity is not reduced.
+  </Card>
+</CardGroup>
+
+```bash
+kams pin notes-mcp     # promote one server
+kams pin               # promote every recorded server
+kams status            # see state and per-tool digests
+```
+
+This is the single most important idea in the detector. The *same byte change* is more
+severe after pinning, because it is no longer just a difference from a remembered sample —
+it contradicts a review that actually happened.
+
+<Callout type="note" title="A server can arrive already poisoned">
+Trust-on-first-use is not a reason to skip inspection. On first sighting Kams still scores
+every description as it stands, and reports anything that already reads as model-directed
+instruction.
+</Callout>
+
+## Severity, in one table
+
+| Change | Default severity | Why |
+|---|---|---:|
+| Description changed | High — **Critical** when pinned and injection-like | Descriptions enter the model's context |
+| Schema widened | Medium | Expands the egress surface |
+| Tool added | Medium | Introduces an unreviewed capability |
+| Schema narrowed | Low | Usually a compatibility or bug fix |
+| Tool removed | Low | Availability, not instruction integrity |
+
+"Widened" means *more ways in*: new properties, or previously-required fields becoming
+optional. A new optional `callback_url` parameter is a very different event from a
+tightened type constraint.
+
+## One metric, one meaning
+
+Only `integrity.definition_drift` increments `mcp.integrity.drift.count`. Result-side
+injection and every other finding family increment the generic `kams.finding.count`.
+
+That separation is what lets the critical SigNoz alert stay narrow enough to be
+trustworthy — it cannot fire on the wrong condition. See
+[Integrity &amp; injection](/docs/detectors/integrity) for the scoring model, and
+[SigNoz](/docs/integrations/signoz) for the alert definition.

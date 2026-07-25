@@ -1,0 +1,138 @@
+export const metadata = {
+  title: "Shared state & TTL",
+  description:
+    "The cross-process restriction file: atomic writes, a one-second read cache, TTL expiry, and fail-open reads.",
+};
+
+<Eyebrow>Policy</Eyebrow>
+
+# Shared state &amp; TTL
+
+<Lede>
+A quarantine decided anywhere must be honoured everywhere. That state cannot live in a
+single process's memory.
+</Lede>
+
+## Why a file
+
+The shim is one process per agent-server connection. The daemon receiving SigNoz alerts is
+another. Kams stores standing restrictions in a small JSON file with atomic replace — and
+that is a deliberate choice, not a shortcut.
+
+<CardGroup cols={3}>
+  <Card title="No hard dependency" icon="solar:plug-circle-linear">
+    A shim keeps working when the daemon is not running. A socket would make the daemon a
+    hard dependency of every connection.
+  </Card>
+  <Card title="No torn reads" icon="solar:lock-keyhole-linear">
+    `os.replace` is atomic on POSIX, so a reader sees either the old file or the new one —
+    never a half-written one.
+  </Card>
+  <Card title="Inspectable" icon="solar:eye-linear">
+    `cat kams-state.json` answers "why is this blocked?" without attaching a debugger to a
+    daemon.
+  </Card>
+</CardGroup>
+
+The cost is propagation latency bounded by the reader's poll interval, which for a
+sub-second cache is well inside the window that matters.
+
+## Format
+
+```json
+{
+  "version": 1,
+  "updated_at": 1753478400.12,
+  "restrictions": [
+    {
+      "action": "quarantine_server",
+      "server": "notes-mcp",
+      "tool": null,
+      "rule": "signoz:Kams — MCP tool definition poisoned (CRITICAL)",
+      "reason": "A pinned tool definition changed into text that reads as prompt injection.",
+      "created_at": 1753478400.12,
+      "expires_at": 1753482000.12,
+      "origin": "signoz",
+      "rate": null
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `action` | One of the six policy actions |
+| `server` / `tool` | Target. `tool` is `null` for a server quarantine |
+| `rule` | The rule that decided it. `signoz:` prefix means the webhook installed it |
+| `reason` | Human-readable, surfaced in the JSON-RPC error the agent receives |
+| `created_at` / `expires_at` | Unix seconds. `expires_at: null` means no expiry |
+| `origin` | `reflex` (a shim detector) or `signoz` (the alert webhook) |
+| `rate` | Present only for `rate_limit`; absent in older files by design |
+
+<Callout type="note" title="Backward compatible by omission">
+`rate` was added after version 1 shipped. A stored restriction without it still loads —
+unknown-field mismatches are skipped rather than raising, so an older or newer writer can
+never brick a reader.
+</Callout>
+
+## Reading
+
+`active()` returns non-expired restrictions, cached for at most **one second**. Short
+enough that a quarantine takes effect promptly; long enough that a hot relay is not
+`stat()`ing the filesystem on every tool call.
+
+The cache is invalidated by mtime, so a write from another process is picked up on the next
+read past the TTL rather than requiring a signal.
+
+```bash
+kams status          # forces a fresh read and prints standing restrictions
+```
+
+## Writing
+
+```text
+1. read current, drop any restriction with the same (server, tool, action)
+2. append the new one
+3. write to a temp file in the SAME directory
+4. os.replace() onto the target
+```
+
+Step 3 matters: the temp file must be on the same filesystem, or `os.replace` is not
+atomic. `tempfile.mkstemp(dir=...)` guarantees that.
+
+Re-installing the same restriction refreshes it rather than accumulating duplicates.
+
+## Expiry and lifting
+
+Two independent mechanisms remove a restriction:
+
+- **TTL.** `expired(now)` is checked on every read, so an expired entry stops being honoured
+  even if nothing has rewritten the file. It is physically removed on the next write.
+- **Resolve.** A SigNoz alert transitioning out of `firing` calls `lift(server)`, which
+  removes every restriction for that server and rewrites the file.
+
+<Callout type="warning" title="Restrictions installed by an alert are always TTL-bound">
+Without a TTL, a flapping or abandoned alert becomes an indefinite outage. The daemon's
+default is one hour, configurable with `kams daemon --ttl`.
+</Callout>
+
+## Fail open
+
+A corrupt, truncated, or missing state file is treated as **no restrictions**:
+
+```python
+except (OSError, json.JSONDecodeError) as exc:
+    log.debug("state unreadable, treating as empty: %r", exc)
+    return []
+```
+
+No service is worse than no restrictions. The same reasoning applies in the policy
+engine — if shared state cannot be read, in-process restrictions still apply and the call
+proceeds.
+
+## In-process plus shared
+
+`PolicyEngine._all()` merges its own restrictions with shared state, de-duplicating on
+`(action, server, tool, rule)`. That is what makes a quarantine fleet-wide rather than
+per-connection: a restriction installed by any other shim, or by the webhook, is honoured
+here too.

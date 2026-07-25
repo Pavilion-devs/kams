@@ -127,4 +127,5 @@ rules:
       min_severity: HIGH
     action: rate_limit
     rate: 6/min
+    ttl: 10m
     reason: This server's results are consuming a disproportionate share of the context window.

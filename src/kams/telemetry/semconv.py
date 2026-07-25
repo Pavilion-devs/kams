@@ -1,21 +1,10 @@
-"""Semantic convention constants.
+"""OpenTelemetry semantic-convention constants used by Kams.
 
-Three tiers, and the distinction matters for the upstream contribution:
-
-  GEN_AI_*  Settled. OpenTelemetry GenAI semantic conventions, as of the
-            2026-07 state of open-telemetry/semantic-conventions-genai.
-            We conform; we do not invent here.
-
-  MCP_*     Unsettled. The GenAI semconv repo carries MCP model YAML but the
-            docs are not yet published. These follow the conventions' naming
-            grammar and are our PROPOSAL, shipped as semconv/mcp.yaml.
-
-  KAMS_*    Ours. Kams-specific and namespaced as such, so nothing here can be
-            mistaken for a standard attribute.
-
-Keeping the tiers visibly separate is the honest thing to do and is what makes
-the upstream PR reviewable: a reader can see exactly which claims we are making
-about the standard and which are our own.
+The MCP span model is published by OpenTelemetry.  Kams implements that model
+and keeps only the genuinely new security/cost fields under the ``kams.*`` or
+experimental ``mcp.context.*`` namespaces.  That line matters: dashboards
+should be portable, and the project must never present a local invention as a
+standard.
 """
 
 from __future__ import annotations
@@ -45,14 +34,17 @@ OP_CHAT: Final = "chat"
 
 PROVIDER_AWS_BEDROCK: Final = "aws.bedrock"
 
-# --- MCP: our proposal -------------------------------------------------------
+# --- MCP / RPC / network: published OpenTelemetry conventions ---------------
 
 MCP_METHOD_NAME: Final = "mcp.method.name"
-MCP_SERVER_NAME: Final = "mcp.server.name"
-MCP_TRANSPORT: Final = "mcp.transport"
 MCP_SESSION_ID: Final = "mcp.session.id"
-MCP_REQUEST_ID: Final = "mcp.request.id"
-MCP_TOOL_NAME: Final = "mcp.tool.name"
+MCP_PROTOCOL_VERSION: Final = "mcp.protocol.version"
+JSONRPC_REQUEST_ID: Final = "jsonrpc.request.id"
+NETWORK_TRANSPORT: Final = "network.transport"
+ERROR_TYPE: Final = "error.type"
+RPC_RESPONSE_STATUS_CODE: Final = "rpc.response.status_code"
+
+# Count/size fields are Kams' extensions to the published model.
 MCP_TOOL_COUNT: Final = "mcp.tool.count"
 
 # Payload sizing. Bytes are cheap and exact; token cost is the expensive,
@@ -62,15 +54,10 @@ MCP_RESPONSE_SIZE: Final = "mcp.response.size_bytes"
 MCP_CONTEXT_COST_TOKENS: Final = "mcp.context.cost.tokens"
 MCP_CONTEXT_COST_ESTIMATED: Final = "mcp.context.cost.estimated"
 
-MCP_ERROR_CODE: Final = "mcp.error.code"
-
-# Proposed. Whether the client supplied W3C trace context via params._meta.
-# We emit what we propose upstream -- a convention nobody implements is a
-# suggestion, not a contribution.
-MCP_TRACE_PROPAGATED: Final = "mcp.trace.propagated"
-
 # --- Kams: ours --------------------------------------------------------------
 
+KAMS_SERVER_NAME: Final = "kams.server.name"
+KAMS_TRACE_PROPAGATED: Final = "kams.trace.propagated"
 KAMS_FINDING_KIND: Final = "kams.finding.kind"
 KAMS_FINDING_SEVERITY: Final = "kams.finding.severity"
 KAMS_FINDING_DETECTOR: Final = "kams.finding.detector"
@@ -80,6 +67,7 @@ KAMS_FINDING_SUMMARY: Final = "kams.finding.summary"
 KAMS_RULE_NAME: Final = "kams.rule.name"
 KAMS_ENFORCE_ACTION: Final = "kams.enforce.action"
 KAMS_ENFORCE_TTL: Final = "kams.enforce.ttl_seconds"
+KAMS_ENFORCE_ORIGIN: Final = "kams.enforce.origin"
 
 KAMS_INTEGRITY_CHANGE: Final = "kams.integrity.change"
 KAMS_INTEGRITY_SCORE: Final = "kams.integrity.score"
@@ -100,13 +88,14 @@ METRIC_OPERATION_DURATION: Final = "mcp.client.operation.duration"
 METRIC_TOOL_CALLS: Final = "mcp.tool.call.count"
 METRIC_TOOL_ERRORS: Final = "mcp.tool.error.count"
 METRIC_CONTEXT_COST: Final = "mcp.context.cost.tokens"
+METRIC_FINDINGS: Final = "kams.finding.count"
 METRIC_INTEGRITY_DRIFT: Final = "mcp.integrity.drift.count"
 METRIC_EGRESS_CLASSIFIED: Final = "mcp.egress.classified.count"
 METRIC_ENFORCEMENT: Final = "kams.enforcement.count"
 
 
 def span_name_for(method: str, tool: str | None = None) -> str:
-    """Span naming follows the conventions' `{operation} {target}` grammar."""
+    """Published MCP naming: ``{mcp.method.name} {target}``."""
     if tool:
-        return f"mcp.{method} {tool}"
-    return f"mcp.{method}"
+        return f"{method} {tool}"
+    return method

@@ -1,0 +1,137 @@
+export const metadata = {
+  title: "Quickstart",
+  description:
+    "Bootstrap SigNoz through Foundry, provision the dashboard and alert, run the deterministic rug pull, and prove SigNoz caused the block.",
+};
+
+<Eyebrow>Getting started</Eyebrow>
+
+# Quickstart
+
+<Lede>
+From a clean checkout to a live control loop — a rug pull detected, alerted on by
+SigNoz, and contained before the next tool call.
+</Lede>
+
+<Callout type="note" title="Prerequisites">
+Docker, Python 3.12+, [uv](https://docs.astral.sh/uv/), and about 3.5 GB of disk for the
+first SigNoz image pull. Full detail in [Installation &amp; setup](/docs/setup).
+</Callout>
+
+<Steps>
+  <Step title="Bring up SigNoz and install Kams">
+    The bootstrap script uses Foundry, creates the first SigNoz organisation when needed,
+    and waits until OTLP is genuinely accepting data — not just until the container is up.
+
+    ```bash
+    ./scripts/bootstrap.sh
+    uv sync
+    ```
+  </Step>
+
+  <Step title="Add your SigNoz API key">
+    Create a key in **Settings → API Keys**, then copy the example environment file and
+    fill it in. The key is only used by the provisioning script and the alert proof.
+
+    ```bash
+    cp .env.example .env
+    # then set SIGNOZ_API_KEY=...
+    ```
+  </Step>
+
+  <Step title="Provision the dashboard, alert, and webhook channel">
+    Nine panels, one deliberately narrow critical alert, and a webhook notification
+    channel pointed at the Kams daemon — all applied through SigNoz's own MCP server.
+
+    ```bash
+    uv run python scripts/provision.py
+    ```
+  </Step>
+
+  <Step title="Run the deterministic attack">
+    A clean notes server is listed and pinned. The server then rug-pulls: same tool name,
+    same schema, new description. Kams compares against the pinned digest, scores the
+    added text, and quarantines the server before the agent can act on it.
+
+    ```bash
+    uv run python demo/scenario.py
+    ```
+
+    The scenario runs in an isolated temp directory, so it never touches your real
+    `kams.lock` or `kams-state.json`.
+  </Step>
+
+  <Step title="Prove SigNoz caused the containment">
+    This is the part that matters. `kams-demo-alert` runs with the local reflex path
+    disabled, waits for Foundry's alert evaluator, and then **fails** unless the saved
+    restriction carries `origin=signoz` and the next MCP call is actually blocked.
+
+    ```bash
+    kams-demo-alert
+    ```
+  </Step>
+</Steps>
+
+## What you should see
+
+By the end of the scenario, Kams has written a critical finding, emitted it on all three
+signals, and installed a quarantine:
+
+```text
+kams WARNING kams.shim: [CRITICAL] integrity.definition_drift: Tool 'save_note'
+  description changed on a pinned baseline and the new text reads as an injection
+  attempt (imperative, exfiltration, cross-tool reference)
+kams WARNING kams.policy: enforcing quarantine_server on notes-mcp
+  [quarantine-poisoned-pinned-definition]
+save_note    BLOCKED  server 'notes-mcp' is quarantined by Kams policy
+  [quarantine-poisoned-pinned-definition]: A pinned tool definition changed into text
+  that reads as prompt injection.
+```
+
+Inspect the standing restriction at any time — it is a plain JSON file, readable without
+a running daemon:
+
+```bash
+kams status
+```
+
+## Verify it in SigNoz
+
+Open `http://localhost:8080` and check the provisioned **Kams — MCP** dashboard:
+
+| Panel | What proves the loop |
+|---|---|
+| Integrity drift | `mcp.integrity.drift.count` incremented for `notes-mcp` |
+| Enforcement by origin | a bar with `origin=signoz`, not just `reflex` |
+| Correlated logs | finding records with non-empty `trace_id` and `span_id` |
+| Trace list | a blocked `tools/call` with a child `kams.enforce` span |
+
+<Callout type="warning" title="Alert timing">
+SigNoz Foundry evaluates the demo rule with an ingestion and evaluation delay, so
+`kams-demo-alert` allows up to five minutes. The local reflex path is immediate; the
+`--no-reflex` flag exists specifically to prove the slower external path really works.
+</Callout>
+
+## Run the real agent
+
+Optional, and it makes live Amazon Bedrock calls that may incur provider charges. It
+requires `AMAZON_BEDROCK_API_KEY`; the model and region are configurable in `.env`.
+
+```bash
+kams-demo-agent
+```
+
+This is not a playback. The agent calls Bedrock Converse, executes the model's selected
+MCP tool through Kams, feeds the resulting policy error back into the conversation, and
+reconciles the estimated result cost against the provider-reported input-token delta.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Wrap your own server" icon="solar:command-linear" href="/docs/integrations/stdio">
+    Adoption is one line in an existing MCP config.
+  </Card>
+  <Card title="Understand the detector" icon="solar:shield-check-linear" href="/docs/integrity">
+    Why pinning turns trust-on-first-use into an assertion.
+  </Card>
+</CardGroup>

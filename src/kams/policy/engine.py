@@ -19,12 +19,13 @@ from __future__ import annotations
 import fnmatch
 import logging
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from kams.detect.base import Finding, Severity
-from kams.policy.model import Action, Policy, Rule
+from kams.policy.model import Action, Policy, Rule, parse_rate
 
 log = logging.getLogger("kams.policy")
 
@@ -39,6 +40,7 @@ class Decision:
     server: str
     tool: str | None = None
     ttl: float | None = None
+    rate: str | None = None
     finding: Finding | None = None
 
     @property
@@ -57,6 +59,8 @@ class Restriction:
     reason: str
     expires_at: float | None
     created_at: float
+    rate: str | None = None
+    origin: str = "reflex"
 
     def expired(self, now: float) -> bool:
         return self.expires_at is not None and now >= self.expires_at
@@ -105,6 +109,7 @@ class PolicyEngine:
         # that is what makes a quarantine fleet-wide rather than per-connection.
         self._shared = shared
         self._restrictions: list[Restriction] = []
+        self._rate_hits: dict[tuple[str, str | None, str], deque[float]] = {}
 
     # ---- evaluation ----------------------------------------------------------
 
@@ -125,6 +130,7 @@ class PolicyEngine:
                     server=finding.server,
                     tool=finding.tool,
                     ttl=rule.ttl,
+                    rate=rule.rate,
                     finding=finding,
                 )
             )
@@ -156,6 +162,8 @@ class PolicyEngine:
                 reason=d.reason,
                 expires_at=(now + d.ttl) if d.ttl else None,
                 created_at=now,
+                rate=d.rate,
+                origin="reflex",
             )
             self._restrictions.append(restriction)
             installed.append(restriction)
@@ -181,6 +189,19 @@ class PolicyEngine:
                 return Verdict(allowed=False, restriction=r)
             if r.action is Action.BLOCK_TOOL and tool and _glob(r.tool or "*", tool):
                 return Verdict(allowed=False, restriction=r)
+            if r.action is Action.RATE_LIMIT and tool and _glob(r.tool or "*", tool):
+                parsed = parse_rate(r.rate)
+                if parsed is None:
+                    continue
+                limit, window = parsed
+                key = (r.server, r.tool, r.rule)
+                hits = self._rate_hits.setdefault(key, deque())
+                now = self._clock()
+                while hits and hits[0] <= now - window:
+                    hits.popleft()
+                if len(hits) >= limit:
+                    return Verdict(allowed=False, restriction=r)
+                hits.append(now)
         return Verdict(allowed=True)
 
     def _all(self) -> list[Restriction]:
@@ -191,10 +212,15 @@ class PolicyEngine:
         rather than raising -- fail open (principle 1).
         """
         out = list(self._restrictions)
+        seen = {(r.action.value, r.server, r.tool, r.rule) for r in out}
         if self._shared is None:
             return out
         try:
             for sr in self._shared.active():
+                key = (sr.action, sr.server, sr.tool, sr.rule)
+                if key in seen:
+                    continue
+                seen.add(key)
                 out.append(
                     Restriction(
                         action=Action(sr.action),
@@ -204,6 +230,8 @@ class PolicyEngine:
                         reason=sr.reason,
                         expires_at=sr.expires_at,
                         created_at=sr.created_at,
+                        rate=getattr(sr, "rate", None),
+                        origin=getattr(sr, "origin", "reflex"),
                     )
                 )
         except Exception as exc:  # noqa: BLE001
@@ -221,6 +249,7 @@ class PolicyEngine:
             reason=reason,
             expires_at=(now + ttl) if ttl else None,
             created_at=now,
+            origin="signoz",
         )
         self._restrictions.append(r)
         log.warning("quarantined %s [%s]: %s", server, rule, reason)
@@ -243,6 +272,7 @@ class PolicyEngine:
                     created_at=r.created_at,
                     expires_at=r.expires_at,
                     origin=origin,
+                    rate=r.rate,
                 )
             )
         except Exception as exc:  # noqa: BLE001

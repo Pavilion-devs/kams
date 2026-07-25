@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 from typing import Any
@@ -109,9 +110,14 @@ class HttpRelay:
 
     async def _handle(self, request: Request) -> Response:
         body = await request.body()
+        correlation = uuid.uuid4().hex
+        transport_context = {"kams.correlation": correlation}
+        if session_id := request.headers.get("Mcp-Session-Id"):
+            transport_context["mcp.session.id"] = session_id
 
         if request.method == "POST" and body:
             msg = jsonrpc.parse(body)
+            msg.context.update(transport_context)
             result = await self._safe(self.on_client_message, msg)
             if result.disposition is Disposition.BLOCK:
                 # JSON-RPC error at HTTP 200: a policy decision is a protocol
@@ -149,10 +155,12 @@ class HttpRelay:
 
         content_type = upstream_resp.headers.get("content-type", "")
         headers = _forwardable(upstream_resp.headers, drop_encoding=True)
+        if response_session := upstream_resp.headers.get("Mcp-Session-Id"):
+            transport_context["mcp.session.id"] = response_session
 
         if SSE_MEDIA_TYPE in content_type:
             return StreamingResponse(
-                self._stream_sse(upstream_resp),
+                self._stream_sse(upstream_resp, transport_context),
                 status_code=upstream_resp.status_code,
                 headers=headers,
                 media_type=content_type,
@@ -162,19 +170,25 @@ class HttpRelay:
         await upstream_resp.aclose()
         if payload:
             msg = jsonrpc.parse(payload)
+            msg.context.update(transport_context)
             await self._safe(self.on_server_message, msg)
             payload = msg.to_bytes()
         return Response(content=payload, status_code=upstream_resp.status_code, headers=headers)
 
     # ---- SSE ------------------------------------------------------------------
 
-    async def _stream_sse(self, upstream_resp: httpx.Response) -> AsyncIterator[bytes]:
+    async def _stream_sse(
+        self,
+        upstream_resp: httpx.Response,
+        transport_context: dict[str, str] | None = None,
+    ) -> AsyncIterator[bytes]:
         """Forward SSE chunks immediately; parse frames from a side buffer.
 
         Forwarding first is the point. Waiting for a complete frame before
         emitting would convert a streaming response into a buffered one, which
         an agent rendering tokens live would notice immediately.
         """
+        transport_context = transport_context or {}
         buffer = b""
         try:
             async for chunk in upstream_resp.aiter_bytes():
@@ -183,7 +197,7 @@ class HttpRelay:
                 buffer += chunk
                 while b"\n\n" in buffer:
                     frame, buffer = buffer.split(b"\n\n", 1)
-                    await self._observe_frame(frame)
+                    await self._observe_frame(frame, transport_context)
                 # A frame that never terminates must not grow without bound.
                 if len(buffer) > 8 * 1024 * 1024:
                     log.warning("oversized SSE frame, dropping observation buffer")
@@ -191,7 +205,11 @@ class HttpRelay:
         finally:
             await upstream_resp.aclose()
 
-    async def _observe_frame(self, frame: bytes) -> None:
+    async def _observe_frame(
+        self,
+        frame: bytes,
+        transport_context: dict[str, str],
+    ) -> None:
         """Extract JSON-RPC from an SSE frame's data lines, for observation only.
 
         Never rewrites: the bytes have already been sent. Detectors on this path
@@ -206,6 +224,7 @@ class HttpRelay:
         payload = b"\n".join(data_lines)
         try:
             msg = jsonrpc.parse(payload)
+            msg.context.update(transport_context)
             await self._safe(self.on_server_message, msg)
         except Exception as exc:  # noqa: BLE001 - observation must never break the stream
             log.debug("SSE frame observation failed: %r", exc)

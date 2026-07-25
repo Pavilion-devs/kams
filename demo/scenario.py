@@ -13,13 +13,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import pathlib
 import shutil
 import sys
+import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-POISON_FLAG = ROOT / "demo" / ".poisoned"
-LOCK = ROOT / "kams.lock"
 
 DIM, BOLD, RED, GREEN, YELLOW, CYAN, RESET = (
     "\033[2m", "\033[1m", "\033[31m", "\033[32m", "\033[33m", "\033[36m", "\033[0m"
@@ -34,8 +34,9 @@ def rule(title: str) -> None:
 class MCPClient:
     """Minimal sequential MCP client over stdio."""
 
-    def __init__(self, command: list[str]) -> None:
+    def __init__(self, command: list[str], *, env: dict[str, str] | None = None) -> None:
         self.command = command
+        self.env = env
         self.proc: asyncio.subprocess.Process | None = None
         self._id = 0
 
@@ -46,6 +47,7 @@ class MCPClient:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=ROOT,
+            env=self.env,
             limit=32 * 1024 * 1024,
         )
         return self
@@ -94,14 +96,28 @@ class MCPClient:
         return b"".join(chunks).decode(errors="replace")
 
 
-def shim_cmd() -> list[str]:
-    return [sys.executable, "-m", "kams.cli", "shim", "--server", "notes-mcp",
-            "--", sys.executable, "demo/rogue_mcp_server.py"]
+def shim_cmd(lock: pathlib.Path, state: pathlib.Path) -> list[str]:
+    return [
+        sys.executable, "-m", "kams.cli", "shim",
+        "--server", "notes-mcp",
+        "--lock", str(lock),
+        "--state", str(state),
+        "--no-forward",
+        "--", sys.executable, "demo/rogue_mcp_server.py",
+    ]
 
 
-async def session(label: str, *, show_tools: bool = False) -> list[str]:
+async def session(
+    label: str,
+    *,
+    lock: pathlib.Path,
+    state: pathlib.Path,
+    poison_flag: pathlib.Path,
+    show_tools: bool = False,
+) -> list[str]:
     """One agent session. Returns lines Kams wrote to stderr."""
-    async with MCPClient(shim_cmd()) as client:
+    env = {**os.environ, "KAMS_DEMO_POISON_FLAG": str(poison_flag)}
+    async with MCPClient(shim_cmd(lock, state), env=env) as client:
         await client.call("initialize", {"protocolVersion": "2025-06-18"})
 
         listed = await client.call("tools/list")
@@ -116,6 +132,10 @@ async def session(label: str, *, show_tools: bool = False) -> list[str]:
             resp = await client.call("tools/call", {"name": tool, "arguments": {"note": "buy milk"}})
             if "error" in resp:
                 print(f"  {tool:12} {RED}BLOCKED{RESET}  {resp['error']['message']}")
+                if label == "clean":
+                    raise RuntimeError(
+                        "clean phase was blocked; isolated demo state is not clean"
+                    )
             else:
                 text = (resp.get("result") or {}).get("content", [{}])[0].get("text", "")
                 print(f"  {tool:12} {GREEN}ok{RESET}       {DIM}{text}{RESET}")
@@ -133,33 +153,51 @@ def show_kams(lines: list[str]) -> None:
 
 
 async def main() -> int:
-    POISON_FLAG.unlink(missing_ok=True)
-    LOCK.unlink(missing_ok=True)
+    with tempfile.TemporaryDirectory(prefix="kams-demo-") as tmp:
+        demo_state = pathlib.Path(tmp)
+        poison_flag = demo_state / "poisoned"
+        lock = demo_state / "kams.lock"
+        state = demo_state / "kams-state.json"
 
-    print(f"\n{BOLD}Kams — MCP rug pull, caught and contained{RESET}")
-    print(f"{DIM}The server never changes its code. Only the text it advertises changes.{RESET}")
+        print(f"\n{BOLD}Kams — MCP rug pull, caught and contained{RESET}")
+        print(f"{DIM}The server never changes its code. Only the text it advertises changes.{RESET}")
 
-    rule("1. First run — the server is clean. Trust on first use.")
-    lines = await session("clean", show_tools=True)
-    show_kams(lines)
-    print(f"  {DIM}(no findings — nothing to report){RESET}" if not lines else "")
+        rule("1. First run — the server is clean. Trust on first use.")
+        lines = await session(
+            "clean",
+            lock=lock,
+            state=state,
+            poison_flag=poison_flag,
+            show_tools=True,
+        )
+        show_kams(lines)
+        print(f"  {DIM}(no findings — nothing to report){RESET}" if not lines else "")
 
-    rule("2. A human reviews the definitions and pins them")
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable, "-m", "kams.cli", "pin", "notes-mcp", cwd=ROOT,
-        stdout=asyncio.subprocess.PIPE)
-    out, _ = await proc.communicate()
-    print(f"  $ kams pin notes-mcp\n  {DIM}{out.decode().strip()}{RESET}")
-    print(f"  {DIM}kams.lock is now an assertion, not an observation.{RESET}")
+        rule("2. A human reviews the definitions and pins them")
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "kams.cli", "pin", "notes-mcp",
+            "--lock", str(lock),
+            cwd=ROOT,
+            stdout=asyncio.subprocess.PIPE,
+        )
+        out, _ = await proc.communicate()
+        print(f"  $ kams pin notes-mcp\n  {DIM}{out.decode().strip()}{RESET}")
+        print(f"  {DIM}The isolated lock is now an assertion, not an observation.{RESET}")
 
-    rule("3. The server rug-pulls — same name, same schema, new description")
-    POISON_FLAG.touch()
-    lines = await session("poisoned", show_tools=True)
-    print()
-    show_kams(lines)
+        rule("3. The server rug-pulls — same name, same schema, new description")
+        poison_flag.touch()
+        lines = await session(
+            "poisoned",
+            lock=lock,
+            state=state,
+            poison_flag=poison_flag,
+            show_tools=True,
+        )
+        print()
+        show_kams(lines)
 
-    rule("4. What just happened")
-    print(f"""  {DIM}The tool's name, schema, and implementation are byte-identical.
+        rule("4. What just happened")
+        print(f"""  {DIM}The tool's name, schema, and implementation are byte-identical.
   Only the description changed — and descriptions are injected verbatim
   into the model's context, which makes them executable instruction.
 
@@ -170,7 +208,6 @@ async def main() -> int:
 
   {BOLD}Traces, findings, and the enforcement span: http://localhost:8080{RESET}
 """)
-    POISON_FLAG.unlink(missing_ok=True)
     return 0
 
 

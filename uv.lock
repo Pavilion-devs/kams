@@ -515,6 +515,8 @@ dependencies = [
     { name = "opentelemetry-sdk" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
+    { name = "starlette" },
+    { name = "uvicorn" },
 ]
 
 [package.dev-dependencies]
@@ -534,6 +536,8 @@ requires-dist = [
     { name = "opentelemetry-sdk", specifier = ">=1.29" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "starlette", specifier = ">=0.41" },
+    { name = "uvicorn", specifier = ">=0.32" },
 ]
 
 [package.metadata.requires-dev]

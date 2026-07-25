@@ -37,6 +37,12 @@ class Action(str, Enum):
 
 _DURATION = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([smhd])?\s*$", re.I)
 _UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+_RATE = re.compile(r"^\s*(\d+)\s*/\s*(s|sec|second|m|min|minute|h|hour)\s*$", re.I)
+_RATE_WINDOWS = {
+    "s": 1.0, "sec": 1.0, "second": 1.0,
+    "m": 60.0, "min": 60.0, "minute": 60.0,
+    "h": 3600.0, "hour": 3600.0,
+}
 
 
 def parse_duration(value: str | int | float | None) -> float | None:
@@ -49,6 +55,16 @@ def parse_duration(value: str | int | float | None) -> float | None:
     if not m:
         raise ValueError(f"bad duration: {value!r}")
     return float(m.group(1)) * _UNITS.get((m.group(2) or "s").lower(), 1)
+
+
+def parse_rate(value: str | None) -> tuple[int, float] | None:
+    """Parse policy rates such as ``4/min`` into (limit, window_seconds)."""
+    if value is None:
+        return None
+    match = _RATE.match(str(value))
+    if not match or int(match.group(1)) <= 0:
+        raise ValueError(f"bad rate: {value!r}")
+    return int(match.group(1)), _RATE_WINDOWS[match.group(2).lower()]
 
 
 def _as_list(value: Any) -> list[str]:
@@ -136,13 +152,16 @@ class Rule:
             raise ValueError(f"rule {raw['name']!r}: unknown action {raw.get('action')!r}") from exc
 
         unless_raw = raw.get("unless")
+        rate = raw.get("rate")
+        if action is Action.RATE_LIMIT and parse_rate(rate) is None:
+            raise ValueError(f"bad rate: {rate!r}")
         return cls(
             name=str(raw["name"]),
             action=action,
             match=Matcher.parse(raw.get("match")),
             unless=Matcher.parse(unless_raw) if unless_raw else None,
             ttl=parse_duration(raw.get("ttl")),
-            rate=raw.get("rate"),
+            rate=str(rate) if rate is not None else None,
             reason=str(raw.get("reason", "")),
         )
 

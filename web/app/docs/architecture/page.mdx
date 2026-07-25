@@ -1,0 +1,97 @@
+export const metadata = {
+  title: "Architecture",
+  description: "The full Kams runtime topology: data plane, control plane, and the five-step spine.",
+};
+
+<Eyebrow>Resources</Eyebrow>
+
+# Architecture
+
+<Lede>
+Data plane on the wire, control plane off it, and one shared restriction store connecting
+them.
+</Lede>
+
+<ArchitectureDiagram framed className="my-8" />
+
+## Reading the diagram
+
+<CardGroup cols={3}>
+  <Card title="Left — adoption" icon="solar:users-group-rounded-linear">
+    Agents call tools through the shim or proxy. Operators pin definitions. Platform runs
+    the control plane and provisions SigNoz.
+  </Card>
+  <Card title="Centre — evidence" icon="solar:chart-square-linear">
+    SigNoz is where MCP traffic, spans, the integrity verdict, and the enforcement record
+    all become visible.
+  </Card>
+  <Card title="Right — machinery" icon="solar:settings-linear">
+    Upstream MCP servers, the detector families and judge, and the control plane that
+    contains.
+  </Card>
+</CardGroup>
+
+## Component map
+
+```text
+src/kams/
+  transport/     stdio and streamable-HTTP adapters
+  protocol/      JSON-RPC parsing and MCP trace propagation
+  shim/          shared interception pipeline
+  detect/        integrity, injection, egress, cost, behaviour
+  policy/        declarative policy and sliding-window limits
+  telemetry/     OTel setup and semantic constants
+  daemon/        webhook, shared state, async enrichment
+provisioning/    versioned SigNoz dashboard and alert
+demo/            deterministic, alert-only, and Bedrock scenarios
+tests/           detector, policy, telemetry-contract, and golden-wire tests
+```
+
+Transport adapters own I/O. The interceptor owns correlation, detection, policy, and
+telemetry. Detectors are pure — no I/O, no clock, no network — which is what lets the whole
+brain be exercised without Docker, SigNoz, or a live MCP server.
+
+## The two planes
+
+| | Data plane | Control plane |
+|---|---|---|
+| Processes | One shim per connection, or one long-lived proxy | One `kamsd` |
+| On the request path | Yes | **No** |
+| Decides | Evidence in a single connection | Fleet-wide, time-windowed conditions |
+| Writes | `kams.lock`, shared state, OTLP | Shared state, OTLP |
+| If it dies | MCP traffic stops | MCP traffic is unaffected |
+
+The daemon being off the request path is the reason a missing daemon or an unavailable
+SigNoz degrades observability and alert-driven policy without breaking otherwise healthy
+MCP traffic.
+
+## Failure behaviour
+
+| Failure | Behaviour |
+|---|---|
+| SigNoz or OTLP unavailable | Export retries and buffers, then drops. MCP continues |
+| Webhook daemon unavailable | No new alert-origin restriction; reflex policy remains |
+| Detector or policy exception | Logged, treated fail-open |
+| Shared-state file unreadable | Treated as empty |
+| Upstream dies | Protocol error or EOF reaches the client; pending span closes as error |
+| No incoming trace context | Valid root MCP span, propagation flag false |
+| LLM enrichment unavailable | Deterministic finding and action unchanged |
+
+## Known boundaries
+
+- Calls already pipelined before a restriction is installed cannot be recalled.
+- The demo webhook assumes a trusted network and has no signature validation.
+- Provider usage is turn-level, so measured cost is defensibly attributed but not
+  tokenised independently per result.
+- Alert evaluation is intentionally slower than the reflex path.
+
+## Source files
+
+<CardGroup cols={2}>
+  <Card title="architecture.md" icon="solar:document-text-linear" href="https://github.com/Pavilion-devs/kams/blob/main/architecture.md">
+    The implementation design document this page summarises.
+  </Card>
+  <Card title="Diagram source" icon="solar:gallery-linear" href="/media/kams-architecture-diagram.svg">
+    Hand-authored SVG on a 1644 × 1010 artboard.
+  </Card>
+</CardGroup>

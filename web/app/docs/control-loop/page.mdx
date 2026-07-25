@@ -1,0 +1,119 @@
+export const metadata = {
+  title: "The control loop",
+  description:
+    "Two paths write the same restriction shape: the in-process reflex and the SigNoz alert webhook. Plus the --no-reflex proof.",
+};
+
+<Eyebrow>Core concepts</Eyebrow>
+
+# The control loop
+
+<Lede>
+The shim sees one connection, right now. SigNoz sees every agent, every server, over
+time. Kams uses both, and routes them through one engine.
+</Lede>
+
+## Two paths, one shape
+
+```text
+Finding ──▶ Reflex policy ─────────────────────┐
+   │        single connection, immediate       │
+   │                                           ▼
+   └──▶ OTLP ──▶ SigNoz ──▶ Alert ──▶ Webhook ──▶ Shared TTL state
+                 fleet + time window                   │
+                                                       ▼
+                                        Next MCP call: allow or block
+```
+
+Both paths construct the *same* `Restriction` and write it to the *same* shared state.
+Enforcement therefore behaves identically no matter which one decided it — which is the
+entire point of having one engine rather than two code paths.
+
+<CardGroup cols={2}>
+  <Card title="Reflex path" icon="solar:bolt-linear">
+    Evidence visible inside a single connection. Runs in-process in about a millisecond.
+    Marked `origin=reflex`.
+  </Card>
+  <Card title="SigNoz path" icon="solar:bell-linear">
+    Aggregation across processes and time. Slower by design. Marked `origin=signoz`.
+  </Card>
+</CardGroup>
+
+## Why route enforcement through an observability backend
+
+Because some conditions are **not expressible in the shim** — it does not have the data.
+
+"This server's error rate across the fleet exceeded 20% over five minutes" requires every
+agent's traffic over a window. A shim process that starts when an agent connects and dies
+when it disconnects cannot know that. SigNoz can.
+
+So the reflex path handles what one connection can determine alone, and the alert path
+handles what only the aggregate knows.
+
+## The `--no-reflex` proof
+
+This is the flag that makes the external loop independently testable.
+
+```bash
+kams shim --no-reflex --server notes-mcp -- python demo/rogue_mcp_server.py
+```
+
+`--no-reflex` loads a **permissive** policy — Kams will not install any new local
+restriction — while still honouring shared state written by the webhook. If a call is
+blocked under `--no-reflex`, the only thing that could have blocked it is SigNoz.
+
+<Callout type="tip" title="This is what kams-demo-alert asserts">
+The proof command runs the scenario with the reflex path disabled, waits for Foundry's
+alert evaluator, and then fails unless the saved restriction carries `origin=signoz` **and**
+the subsequent MCP call is actually blocked. It cannot pass by accident.
+</Callout>
+
+## What the webhook does
+
+The daemon accepts SigNoz notifications and converts firing alerts into TTL-bound
+quarantines.
+
+<Steps>
+  <Step title="Identify the server">
+    Payload shapes vary by alert and by version, so Kams looks in `alerts`,
+    `groupedAlerts`, and the payload root, checking `labels`, `commonLabels`, and
+    `annotations` for `server`, `mcp.server.name`, or `mcp_server_name`.
+  </Step>
+  <Step title="Refuse to guess">
+    If no server label is found, the alert is logged with its payload and **ignored** with
+    a `202`. Quarantining the wrong server is worse than quarantining nothing.
+  </Step>
+  <Step title="Write shared state">
+    A `quarantine_server` restriction is written with `origin=signoz`, the rule name
+    prefixed `signoz:`, the alert's description as the reason, and a bounded TTL.
+  </Step>
+  <Step title="Emit its own telemetry">
+    A control-plane span, a `kams.enforcement.count` increment, and a structured OTLP log —
+    all tagged `kams.enforce.origin=signoz`.
+  </Step>
+</Steps>
+
+## Resolved alerts lift restrictions
+
+A notification whose status is not `firing` lifts matching server restrictions instead of
+installing one. A payload with no status at all is treated as firing — a missed
+containment is worse than an over-eager, TTL-bounded one.
+
+<Callout type="warning" title="TTLs are not optional">
+Firing restrictions are always TTL-bound. Without that, a flapping or abandoned alert
+becomes an indefinite outage — the monitoring system causing the incident it was meant to
+catch.
+</Callout>
+
+## Trace honesty
+
+A block that happens *inside* a request emits an enforcement span as a **child** of the
+active MCP span, because the context exists.
+
+Alert-driven enforcement happens minutes later in a different process, and the SigNoz
+webhook payload carries no W3C trace context. Kams therefore emits a **separate correlated
+control-plane span** rather than falsely attaching it to the original trace.
+
+The same honesty applies to the [LLM judge](/docs/detectors/egress-cost-behaviour):
+enrichment spans use OpenTelemetry **links**, not parenthood, because making a
+minutes-later analysis a child would distort the original trace's duration.

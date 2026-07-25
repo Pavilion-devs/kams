@@ -12,11 +12,17 @@ import os
 
 from opentelemetry import metrics, trace
 from opentelemetry.context import Context
+from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.propagators.composite import CompositePropagator
+from opentelemetry.baggage.propagation import W3CBaggagePropagator
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.metrics import Counter, Histogram, MeterProvider, UpDownCounter
 from opentelemetry.sdk.metrics.export import AggregationTemporality
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.sdk.metrics.view import ExplicitBucketHistogramAggregation, View
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
@@ -24,10 +30,16 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 
 log = logging.getLogger("kams.telemetry")
 
-_PROPAGATOR = TraceContextTextMapPropagator()
+_PROPAGATOR = CompositePropagator(
+    [TraceContextTextMapPropagator(), W3CBaggagePropagator()]
+)
 _INITIALISED = False
+_LOGGER_PROVIDER: LoggerProvider | None = None
 
 DEFAULT_ENDPOINT = "http://localhost:4317"
+MCP_DURATION_BUCKETS = (
+    0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 30, 60, 120, 300
+)
 
 
 def setup(service_name: str, *, endpoint: str | None = None, extra_resource: dict | None = None) -> None:
@@ -37,7 +49,7 @@ def setup(service_name: str, *, endpoint: str | None = None, extra_resource: dic
     data-plane throughput, `kamsd` is control-plane activity. Mixing them into one
     service would make both dashboards useless.
     """
-    global _INITIALISED
+    global _INITIALISED, _LOGGER_PROVIDER
     if _INITIALISED:
         return
 
@@ -79,7 +91,34 @@ def setup(service_name: str, *, endpoint: str | None = None, extra_resource: dic
             ),
             export_interval_millis=5000,
         )
-        metrics.set_meter_provider(MeterProvider(resource=resource, metric_readers=[reader]))
+        metrics.set_meter_provider(
+            MeterProvider(
+                resource=resource,
+                metric_readers=[reader],
+                views=[
+                    View(
+                        instrument_name="mcp.client.operation.duration",
+                        aggregation=ExplicitBucketHistogramAggregation(
+                            boundaries=MCP_DURATION_BUCKETS
+                        ),
+                    )
+                ],
+            )
+        )
+
+        # Python logging becomes a real OTLP signal, correlated automatically
+        # with the active trace/span by LoggingHandler.
+        _LOGGER_PROVIDER = LoggerProvider(resource=resource)
+        _LOGGER_PROVIDER.add_log_record_processor(
+            BatchLogRecordProcessor(
+                OTLPLogExporter(endpoint=endpoint, insecure=True),
+                schedule_delay_millis=1000,
+                max_queue_size=2048,
+            )
+        )
+        logging.getLogger().addHandler(
+            LoggingHandler(level=logging.NOTSET, logger_provider=_LOGGER_PROVIDER)
+        )
         _INITIALISED = True
     except Exception as exc:  # noqa: BLE001 - telemetry must never break the workload
         log.warning("telemetry setup failed, continuing without it: %r", exc)
@@ -107,12 +146,21 @@ def shutdown() -> None:
             provider.shutdown()
     except Exception as exc:  # noqa: BLE001
         log.debug("meter shutdown: %r", exc)
+    try:
+        if _LOGGER_PROVIDER is not None:
+            _LOGGER_PROVIDER.shutdown()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("logger shutdown: %r", exc)
 
 
 # --- W3C context over MCP `_meta` --------------------------------------------
 
 
-def context_from_traceparent(traceparent: str | None, tracestate: str | None = None) -> Context | None:
+def context_from_traceparent(
+    traceparent: str | None,
+    tracestate: str | None = None,
+    baggage: str | None = None,
+) -> Context | None:
     """Rebuild parent context from a traceparent carried in `params._meta`.
 
     Returns None when absent or malformed, which the caller records as an
@@ -123,6 +171,8 @@ def context_from_traceparent(traceparent: str | None, tracestate: str | None = N
     carrier = {"traceparent": traceparent}
     if tracestate:
         carrier["tracestate"] = tracestate
+    if baggage:
+        carrier["baggage"] = baggage
     try:
         ctx = _PROPAGATOR.extract(carrier)
     except Exception:  # noqa: BLE001
@@ -131,8 +181,14 @@ def context_from_traceparent(traceparent: str | None, tracestate: str | None = N
     return ctx if span_ctx.is_valid else None
 
 
-def traceparent_from_current() -> tuple[str | None, str | None]:
-    """Serialise the active span for injection into an outbound `_meta`."""
+def traceparent_from_current(
+    context: Context | None = None,
+) -> tuple[str | None, str | None, str | None]:
+    """Serialise active W3C trace state and baggage for MCP ``params._meta``."""
     carrier: dict[str, str] = {}
-    _PROPAGATOR.inject(carrier)
-    return carrier.get("traceparent"), carrier.get("tracestate")
+    _PROPAGATOR.inject(carrier, context=context)
+    return (
+        carrier.get("traceparent"),
+        carrier.get("tracestate"),
+        carrier.get("baggage"),
+    )

@@ -1,0 +1,137 @@
+export const metadata = {
+  title: "SigNoz",
+  description:
+    "The nine-panel dashboard, the deliberately narrow critical alert, and the webhook daemon that turns an alert into a quarantine.",
+};
+
+<Eyebrow>Integrations</Eyebrow>
+
+# SigNoz
+
+<Lede>
+SigNoz is not a place Kams sends data to look at later. It is part of the runtime: it
+evaluates the condition that causes containment.
+</Lede>
+
+## Provision as code
+
+```bash
+uv run python scripts/provision.py
+```
+
+Both artifacts are versioned JSON applied through SigNoz's own MCP server, so re-running
+updates in place rather than duplicating.
+
+## The dashboard
+
+`provisioning/dashboards/kams-mcp.json` defines nine panels:
+
+| # | Panel | Source |
+|---:|---|---|
+| 1 | Call rate by server | `mcp.tool.call.count` |
+| 2 | p95 operation duration | `mcp.client.operation.duration` |
+| 3 | Error rate | `mcp.tool.error.count` |
+| 4 | Integrity drift | `mcp.integrity.drift.count` |
+| 5 | Context tokens by server and estimated/measured | `mcp.context.cost.tokens` |
+| 6 | Sensitive-egress classes | `mcp.egress.classified.count` |
+| 7 | Enforcement by action, rule, and origin | `kams.enforcement.count` |
+| 8 | All Kams findings | `kams.finding.count` |
+| 9 | Correlated integrity logs | OTLP logs |
+
+Panel 7 is the one that proves the loop: it separates `origin=reflex` from `origin=signoz`,
+so you can see at a glance whether a containment was decided locally or by the backend.
+
+<Callout type="warning" title="A saved dashboard is not proof">
+A dashboard JSON proves a query was written, not that it returns anything. Every panel here
+has been checked against live data from a real run — which is a different claim, and the
+only one worth making.
+</Callout>
+
+## The critical alert
+
+`provisioning/alerts/integrity-critical.json` is intentionally narrow. All four conditions
+must hold:
+
+```text
+severity = 'CRITICAL'
+AND kind = 'INTEGRITY_DRIFT'
+AND detector = 'integrity.definition_drift'
+AND baseline_state = 'pinned'
+```
+
+<CardGroup cols={2}>
+  <Card title="Why the detector clause" icon="solar:filter-linear">
+    `INTEGRITY_DRIFT` could in principle come from elsewhere. Naming the detector pins the
+    alert to exactly one code path.
+  </Card>
+  <Card title="Why the pinned clause" icon="solar:pin-linear">
+    Drift on a baseline nobody vouched for is not an assertion violation. Only a pinned
+    definition can quarantine a server.
+  </Card>
+</CardGroup>
+
+This is also why `mcp.integrity.drift.count` exists as a separate metric from
+`kams.finding.count` — so the alert cannot fire on a result injection or an egress finding
+that happens to be critical.
+
+## The webhook daemon
+
+```bash
+kams daemon --port 8787 --state kams-state.json --ttl 1h
+```
+
+Point a SigNoz webhook notification channel at `http://<host>:8787/`. The daemon serves
+three things:
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/` | `POST` | SigNoz alert notifications, firing and resolved |
+| `/findings` | `POST` | Findings from shims, queued for LLM enrichment. Always `202` |
+| `/` | `GET` | Health plus the current restriction list |
+
+### What a firing alert does
+
+<Steps>
+  <Step title="Identify the server">
+    Payload shapes vary, so Kams checks `alerts`, `groupedAlerts`, and the payload root, in
+    each looking at `labels`, `commonLabels`, and `annotations` for `server`,
+    `mcp.server.name`, or `mcp_server_name`.
+  </Step>
+  <Step title="Refuse to guess">
+    No identifiable server means the payload is logged and the alert **ignored** with a
+    `202`. Quarantining the wrong server is worse than quarantining nothing.
+  </Step>
+  <Step title="Write shared state">
+    A `quarantine_server` restriction with `origin=signoz`, the rule prefixed `signoz:`, and
+    a bounded TTL.
+  </Step>
+  <Step title="Emit control-plane telemetry">
+    Its own span, a `kams.enforcement.count` increment, and a structured OTLP log — all
+    carrying `kams.enforce.origin=signoz`.
+  </Step>
+</Steps>
+
+A resolved notification calls `lift(server)` instead, removing matching restrictions.
+
+<Callout type="danger" title="The demo webhook does not verify signatures">
+It assumes loopback or a trusted network. Do not expose it to the internet as-is.
+</Callout>
+
+## Verify the loop end to end
+
+```bash
+kams-demo-alert
+```
+
+Runs the scenario with `--no-reflex`, waits for Foundry's evaluator, and fails unless the
+saved restriction carries `origin=signoz` and the next MCP call is blocked. Allow up to
+five minutes for ingestion and evaluation.
+
+## Correlated logs
+
+Python logging is exported through OTLP. Finding and enforcement records emitted inside an
+active span arrive with non-empty `trace_id` and `span_id`, so panel 9 links straight back
+to the trace waterfall.
+
+Attributes carry safe structured dimensions only — sensitive values are excluded at finding
+construction time, not filtered out later.

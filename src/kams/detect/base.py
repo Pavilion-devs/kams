@@ -81,7 +81,7 @@ class Finding:
             sc.KAMS_FINDING_SUMMARY: self.summary[:400],
         }
         if self.tool:
-            attrs[sc.MCP_TOOL_NAME] = self.tool
+            attrs[sc.GEN_AI_TOOL_NAME] = self.tool
         return attrs
 
 

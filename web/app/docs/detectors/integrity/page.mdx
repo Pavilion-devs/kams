@@ -1,0 +1,142 @@
+export const metadata = {
+  title: "Integrity & injection",
+  description:
+    "Change classification, injection scoring with noisy-OR, homoglyph squatting, and result-side injection.",
+};
+
+<Eyebrow>Detectors</Eyebrow>
+
+# Integrity &amp; injection
+
+<Lede>
+Four detector IDs, one severity model. Deterministic rules — not an LLM — decide severity
+and enforcement.
+</Lede>
+
+## Detector IDs
+
+| Detector | Kind | Fires on |
+|---|---|---|
+| `integrity.definition_drift` | `INTEGRITY_DRIFT` | A tool changed against a recorded baseline |
+| `integrity.description_injection` | `INTEGRITY_INJECTION` | A first-sighting description already reads as instruction |
+| `integrity.tool_squatting` | `INTEGRITY_INJECTION` | A tool name mixes character scripts |
+| `integrity.result_injection` | `INTEGRITY_INJECTION` | A tool *result* contains model-directed instruction |
+
+<Callout type="note" title="Only one increments the drift metric">
+`mcp.integrity.drift.count` is incremented **only** by `integrity.definition_drift`.
+Everything else increments `kams.finding.count`. That is what keeps the critical alert
+narrow enough to trust.
+</Callout>
+
+## Change classification
+
+`diff_tools()` compares per-tool digests and emits typed changes. Because the description
+and schema digests are tracked separately, a single tool can produce two changes.
+
+| Class | Base severity | Detected by |
+|---|---|---|
+| `DESCRIPTION_CHANGED` | High | description digest moved |
+| `SCHEMA_WIDENED` | Medium | new properties, or required fields dropped |
+| `TOOL_ADDED` | Medium | name absent from baseline |
+| `SCHEMA_CHANGED` | Medium | both widened and narrowed |
+| `SCHEMA_NARROWED` | Low | properties removed, or new required fields |
+| `TOOL_REMOVED` | Low | baseline name absent from current |
+
+On a **provisional** baseline every severity is reduced by one level, floored at `LOW`.
+On a **pinned** baseline it is not. See [Tool-definition integrity](/docs/integrity).
+
+## Injection scoring
+
+Scoring runs **only on text added by a change**, not on the whole description. Rewriting a
+typo does not resemble inserting an instruction block, and scoring the delta is what makes
+that distinction possible.
+
+Independent signals are combined with **noisy-OR**:
+
+```python
+score = 1 - Π (1 - weight_i × signal_i)
+```
+
+<Callout type="tip" title="Why noisy-OR rather than a weighted sum">
+The signals are largely independent — invisible Unicode tells you nothing about whether
+the text also contains an exfiltration URL — and a single strong signal should be able to
+carry a verdict on its own. A sum would dilute one damning signal among several quiet ones,
+and would need clamping to stay in range.
+</Callout>
+
+### Signals
+
+- model-directed imperatives
+- instruction blocks (`<IMPORTANT>`-style delimiters)
+- exfiltration shapes (URLs, "send to", file reads)
+- cross-tool references — one tool's description talking about another's behaviour
+- invisible Unicode: zero-width and bidi codepoints
+- encoded blobs
+- rewrite magnitude relative to the original
+
+### Thresholds
+
+| Threshold | Default | Effect |
+|---|---:|---|
+| `THRESHOLD_HIGH` | `0.55` | Critical when pinned, High when provisional |
+| `THRESHOLD_MEDIUM` | `0.30` | High when pinned, Medium when provisional |
+
+Both are overridable from `policy.yaml`:
+
+```yaml
+thresholds:
+  integrity.description_delta:
+    high: 0.55
+    medium: 0.30
+```
+
+### Resulting severity
+
+| Baseline | Score ≥ 0.55 | Score ≥ 0.30 | Below 0.30 |
+|---|---|---|---|
+| Pinned | **CRITICAL** | HIGH | HIGH (base class severity) |
+| Provisional | HIGH | MEDIUM | MEDIUM / LOW (class severity − 1) |
+
+Confidence is `0.99` for a pure digest comparison — the comparison itself is exact — and
+`max(0.6, score)` when injection signals contributed.
+
+## Tool squatting
+
+A tool name mixing character scripts renders identically to an ASCII name while being a
+different string. There is no benign explanation for that in server-authored metadata, so
+it is a fixed `HIGH` at `0.9` confidence, and the finding carries the full codepoint list
+as evidence:
+
+```json
+{ "tool_name": "sаve_note", "codepoints": ["U+0073", "U+0430", "U+0076", "…"] }
+```
+
+## Result-side injection
+
+Injection is not confined to descriptions — any server output reaches the model's context.
+Kams scans text blocks in `tools/call` results with the same scorer, at the `HIGH`
+threshold only.
+
+The default policy treats this differently from description drift, and the reasoning is
+worth stating: results are per-call, so one poisoned response does not mean every tool on
+the server is compromised. Policy therefore blocks the **tool**, not the server:
+
+```yaml
+- name: block-tool-on-result-injection
+  match:
+    detector: integrity.result_injection
+    min_severity: HIGH
+  action: block_tool
+  ttl: 15m
+```
+
+## Evidence is quotable here
+
+Tool descriptions and schemas are server-advertised **metadata**, not user secrets.
+Quoting the matched text is safe and is the whole value of the finding — a human needs to
+see what the injected text actually said. Findings carry `description_before` and
+`description_after`, truncated to 300 characters.
+
+That is the opposite of the [egress detector](/docs/detectors/egress-cost-behaviour),
+which never emits a value. Redaction is a property of the detector, not of the finding
+type.

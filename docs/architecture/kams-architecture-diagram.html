@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Kams — Architecture</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <style>
+    *{ box-sizing:border-box; }
+    html,body{ margin:0; min-height:100%; }
+    body{
+      background:
+        radial-gradient(1200px 600px at 20% -10%, #eef4ff 0%, transparent 60%),
+        radial-gradient(1200px 600px at 90% 110%, #eaf6ff 0%, transparent 60%),
+        #f6f8fc;
+      display:flex; align-items:center; justify-content:center;
+      padding:clamp(8px, 2.5vw, 40px);
+      font-family:'Inter',system-ui,-apple-system,'Segoe UI',Roboto,Arial,sans-serif;
+    }
+    /* The diagram scales to fill the viewport width up to its natural size, then centers.
+       aspect-ratio keeps it correctly proportioned at every screen size. */
+    .frame{
+      width:100%;
+      max-width:1644px;
+      margin:auto;
+    }
+    .diagram{
+      display:block;
+      width:100%;
+      height:auto;
+      aspect-ratio:1644 / 1010;
+      border-radius:14px;
+      box-shadow:0 30px 80px rgba(15,23,42,0.10);
+      background:#ffffff;
+    }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <object class="diagram" type="image/svg+xml"
+            data="kams-architecture-diagram.svg"
+            aria-label="Kams architecture diagram — SigNoz-native observability and containment for MCP">
+      <img class="diagram" src="kams-architecture-diagram.png"
+           alt="Kams architecture diagram — SigNoz-native observability and containment for MCP">
+    </object>
+  </div>
+</body>
+</html>

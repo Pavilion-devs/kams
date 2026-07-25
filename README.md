@@ -1,283 +1,405 @@
-# Kams
+![Kams product banner](docs/assets/kams-readme-banner.png)
 
-**An OpenTelemetry-native observability and control layer for the Model Context Protocol.**
+# Kams — Observable Trust and Closed-Loop Containment for MCP
 
-Built for [Agents of SigNoz](https://www.wemakedevs.org/hackathons/signoz) — Track 01, AI & Agent Observability.
+> A transparent observability and control boundary for the **Model Context
+> Protocol** — pinning the tool definitions your agents trust, emitting
+> OpenTelemetry traces, metrics, and correlated logs to **SigNoz**, detecting
+> dangerous drift and sensitive egress, and turning an alert into a TTL-bound
+> quarantine before the next unsafe tool call reaches the server.
 
-> *"If you can't observe your AI agents, you don't own them."*
->
-> Everyone answers the first half. Kams answers **own**.
+Built for **[Agents of SigNoz](https://www.wemakedevs.org/hackathons/signoz)** —
+Track 01, AI & Agent Observability.
 
 ---
 
-## The problem
+## Live
 
-MCP is the fastest-spreading interface in agent infrastructure and it is almost entirely unobserved.
+- 🎥 **Demo video** — https://usekams.xyz/
+- 🌐 **Live demo** — https://usekams.xyz/
+- 📖 **Docs** — https://docs.usekams.xyz/
+- 🗺️ **Architecture** — https://docs.usekams.xyz/architecture
 
-An MCP server is **third-party code whose tool descriptions are injected verbatim into your model's context**, and whose arguments carry your data off-process. There is no telemetry standard for it, no integrity check on it, and no way to contain it when it misbehaves. Your package manager verifies a lockfile before running someone else's code. Your agent does not.
+---
 
-That gap has a documented exploit. A **rug pull** is when a server behaves benignly long enough to be reviewed and trusted, then silently changes what it advertises. The tool's name, schema, and implementation stay identical — only the description changes. Since descriptions become instructions, that is enough.
+## Table of Contents
 
-```
-$ python demo/scenario.py
+- [Quick Path](#quick-path)
+- [Why It Stands Out](#why-it-stands-out)
+- [What it does](#what-it-does)
+- [Architecture](#architecture)
+- [Requirements](#requirements)
+- [Setup](#setup)
+- [Usage](#usage)
+- [Kams at the MCP boundary](#kams-at-the-mcp-boundary)
+  - [Use Kams from any stdio MCP host](#use-kams-from-any-stdio-mcp-host)
+  - [Streamable HTTP](#streamable-http)
+  - [SigNoz-origin containment proof](#signoz-origin-containment-proof)
+  - [Real Bedrock agent path](#real-bedrock-agent-path)
+- [Project layout](#project-layout)
+- [AI assistance](#ai-assistance)
+- [License](#license)
 
-3. The server rug-pulls — same name, same schema, new description
-  save_note    Save a short note to the user's notebook. Returns the note i…  ← poisoned
-  save_note    BLOCKED  server 'notes-mcp' is quarantined by Kams policy
-                        [quarantine-poisoned-pinned-definition]: A pinned tool
-                        definition changed into text that reads as prompt injection.
+---
 
-  [CRITICAL] integrity.definition_drift: Tool 'save_note' description changed on a
-             pinned baseline and the new text reads as an injection attempt
-             (model_directed_imperative, instruction_block, rewrite_magnitude)
-  enforcing quarantine_server on notes-mcp [quarantine-poisoned-pinned-definition]
-```
+## Quick Path
 
-## What Kams does
-
-A transparent MCP interceptor. Any agent — Claude Code, Cursor, a LangChain app — changes one line of config to point at Kams instead of the real server. Kams forwards faithfully and:
-
-- emits **OpenTelemetry spans, metrics, and logs** into SigNoz for every MCP operation
-- **pins tool definitions** in `kams.lock` and detects drift against them
-- **scores server-originated text** for prompt injection, deterministically
-- **enforces policy** — throttle, block, quarantine — and emits the enforcement as a span
-
-```
-agent ──▶ kams-shim ──▶ upstream MCP server
-              │
-              ├──── OTLP ────▶ SigNoz  (traces · metrics · logs · dashboards · alerts)
-              │                   │
-              └──── enforce ◀─────┘  alert webhook
-```
-
-## Quickstart
-
-Requires Docker and Python 3.12+.
+If you want the shortest path through the project:
 
 ```bash
-./scripts/bootstrap.sh      # SigNoz via Foundry, org created, OTLP verified
+./scripts/bootstrap.sh
 uv sync
+cp .env.example .env   # set SIGNOZ_API_KEY
+uv run python scripts/provision.py
 uv run python demo/scenario.py
+uv run kams-demo-alert
 ```
 
-Point an existing agent at it by wrapping the server command:
+The final command deliberately disables local reflex enforcement. It waits for
+SigNoz to evaluate the critical alert and **fails** unless the resulting
+restriction carries `origin=signoz` and the next MCP call is actually blocked.
 
-```jsonc
+For the docs site:
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+Then open `http://localhost:3000/docs`.
+
+For the implementation details:
+
+- Quickstart — https://docs.usekams.xyz/quickstart
+- Interactive architecture — https://docs.usekams.xyz/architecture
+- Implemented runtime design — [`architecture.md`](architecture.md)
+
+## Why It Stands Out
+
+Kams is strong for AI and agent observability because it does three things
+together:
+
+- **It treats MCP as an observable dependency boundary.** Kams emits published
+  OpenTelemetry MCP spans, explicit-bucket metrics, and trace-correlated logs
+  from both stdio and streamable HTTP without requiring agent SDK changes.
+- **It measures trust instead of assuming it.** Kams fingerprints every tool's
+  `(name, description, inputSchema)`, distinguishes provisional observation
+  from an explicit human pin, and classifies the exact change when a server
+  drifts.
+- **It lets observability change the outcome.** SigNoz does not merely display
+  the incident. Its alert calls Kams back, writes shared TTL-bound policy state,
+  and stops the next unsafe call with an explicit JSON-RPC error and its own
+  enforcement telemetry.
+
+The differentiator is not “MCP security” in isolation. It is the complete
+control loop:
+
+```text
+MCP traffic → correlated evidence in SigNoz → alert evaluation
+            → shared policy state → observable enforcement
+```
+
+## What it does
+
+- **Transparent MCP interception** — `kams shim` wraps stdio servers and
+  `kams proxy` fronts streamable-HTTP servers. Both transports use the same
+  `Interceptor`, so detectors and policy cannot silently diverge.
+- **Standards-compatible telemetry** — published OpenTelemetry MCP span names
+  and attributes, SEP-414 trace propagation through `params._meta`, W3C
+  `traceparent`/`tracestate`/baggage preservation, explicit latency buckets, and
+  `error.type`.
+- **Tool-definition pinning** — canonicalises and fingerprints every tool over
+  `(name, description, inputSchema)` in `kams.lock`. `kams pin` promotes a
+  remembered first observation into a human assertion.
+- **Definition-drift classification** — distinguishes description changes,
+  schema widening or narrowing, tool addition, and tool removal instead of
+  treating every changed `tools/list` response as equally dangerous.
+- **Deterministic injection scoring** — scores only added text across
+  model-directed imperatives, instruction blocks, exfiltration shapes,
+  cross-tool references, invisible Unicode, encoded blobs, and rewrite
+  magnitude. An LLM never decides severity or enforcement.
+- **Sensitive-egress detection** — classifies secrets and PII before forwarding.
+  Findings contain the class, JSON path, count, and a per-installation salted
+  digest — never the raw value.
+- **Honest context-cost attribution** — estimates tool-result tokens from bytes,
+  labels every estimate, and lets the real Bedrock runner reconcile it against
+  provider-reported input-token usage.
+- **Behavioural reliability checks** — detects error-rate spikes, latency drift,
+  retry storms, and thrash while distinguishing useless repetition from
+  legitimate polling with changing results.
+- **Declarative policy** — ordered, first-match-wins rules in `policy.yaml`
+  support allow, warn, redact, rate-limit, block-tool, and quarantine-server
+  actions with real sliding windows.
+- **Dual control loop** — an immediate per-connection reflex path and a
+  fleet-wide SigNoz alert path write the same restriction shape. `--no-reflex`
+  exists specifically to prove the external path independently.
+- **Inspectable shared state** — restrictions are atomically written to a small
+  JSON file, cached for at most one second, expired by TTL, and read fail-open if
+  malformed.
+- **Asynchronous enrichment** — an optional Bedrock judge can annotate a safe
+  subset of integrity findings on linked spans. It cannot change the
+  deterministic verdict or action.
+- **Reproducible SigNoz resources** — the nine-panel dashboard, critical alert,
+  and webhook channel are versioned as code and provisioned through SigNoz's own
+  MCP server.
+- **Real proof paths** — a deterministic rogue-server scenario, an external
+  alert-loop assertion, and a live Bedrock agent that feeds Kams' policy error
+  back to the model instead of replaying a scripted transcript.
+
+## Architecture
+
+![Kams architecture](docs/architecture/kams-architecture-diagram.png)
+
+In short: an agent calls an MCP server through Kams' stdio relay or HTTP proxy.
+The shared interceptor faithfully forwards the wire traffic, evaluates trust
+and policy, and exports traces, metrics, and logs to SigNoz. SigNoz evaluates a
+narrow pinned-definition alert and calls the Kams daemon, which writes
+TTL-bound shared state. The next tool call reads that state and is allowed,
+redacted, limited, blocked, or quarantined explicitly.
+
+**Explore it live:**
+
+- 🌐 Live demo — https://usekams.xyz/
+- 🗺️ Interactive architecture — https://docs.usekams.xyz/architecture
+- 📖 Docs — https://docs.usekams.xyz/
+- 🎥 Demo video — https://usekams.xyz/
+
+## Requirements
+
+- macOS or Linux
+- Python 3.12+ and [`uv`](https://docs.astral.sh/uv/)
+- Docker with about 3.5 GB available for the first SigNoz image pull
+- A SigNoz API key for dashboard, alert, and webhook provisioning
+- Optional: an Amazon Bedrock API key for the real agent and enrichment paths
+
+## Setup
+
+### 1. Bring up SigNoz and install Kams
+
+```bash
+./scripts/bootstrap.sh
+uv sync
+```
+
+The bootstrap uses SigNoz Foundry, creates the first organisation when needed,
+restarts the ingester after registration, and waits until the OTLP receivers
+are genuinely accepting data — not merely until Docker reports a running
+container.
+
+### 2. Configure the environment
+
+Create a SigNoz API key under **Settings → API Keys**, then:
+
+```bash
+cp .env.example .env
+```
+
+Required for provisioning:
+
+```dotenv
+SIGNOZ_API_KEY=...
+SIGNOZ_URL=http://localhost:8080
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+```
+
+Optional real-agent configuration:
+
+```dotenv
+AMAZON_BEDROCK_API_KEY=...
+AWS_REGION=us-east-1
+KAMS_MODEL=us.anthropic.claude-sonnet-4-6
+```
+
+### 3. Provision SigNoz as code
+
+```bash
+uv run python scripts/provision.py
+```
+
+This creates or updates the versioned nine-panel dashboard, the deliberately
+narrow critical integrity alert, and the webhook channel that points back to
+the Kams daemon.
+
+### 4. Verify the installation
+
+```bash
+uv run python demo/scenario.py
+uv run kams status
+```
+
+The scenario runs in an isolated temporary directory. It records a clean
+definition, pins it, changes only the sentence the model reads, emits the
+finding, quarantines the server, and proves the next call is blocked without
+touching your real `kams.lock` or `kams-state.json`.
+
+## Usage
+
+```bash
+# Show pinned definitions and standing restrictions
+uv run kams status
+
+# Promote one server's recorded definitions to an explicit assertion
+uv run kams pin notes-mcp
+
+# Wrap a stdio MCP server
+uv run kams shim --server filesystem -- \
+  npx -y @modelcontextprotocol/server-filesystem /tmp
+
+# Reverse-proxy a streamable-HTTP MCP server
+uv run kams proxy \
+  --upstream http://localhost:8000/mcp \
+  --server signoz-mcp \
+  --port 8900
+
+# Run the webhook control plane
+uv run kams daemon --port 8787 --ttl 1h
+
+# Deterministic local rug-pull proof
+uv run python demo/scenario.py
+
+# Prove the SigNoz alert caused the quarantine
+uv run kams-demo-alert
+
+# Optional real Bedrock agent
+uv run kams-demo-agent
+```
+
+Observation-only and proof-oriented switches:
+
+- `--no-telemetry` — relay without exporting telemetry.
+- `--no-enforce` — detect and observe without enforcing policy.
+- `--no-reflex` — do not install new local restrictions; continue honouring
+  shared state written by SigNoz.
+- `--no-integrity`, `--no-egress`, `--no-behavioural` — disable individual
+  detector families.
+
+## Kams at the MCP boundary
+
+Kams is both an adoption layer and a control boundary:
+
+```text
+MCP host / AI agent
+  → Kams stdio shim or streamable-HTTP proxy
+  → shared interceptor: observe · detect · enforce
+  → upstream MCP server
+                │
+                └→ SigNoz → alert webhook → shared TTL policy
+```
+
+It normally forwards MCP byte-for-byte. The only deliberate mutations are trace
+context injection and policy-authorised redaction. Detector, policy, telemetry,
+or shared-state failures are treated fail-open; an explicit standing
+restriction is the intentional exception.
+
+### Use Kams from any stdio MCP host
+
+Add Kams around an existing server in Claude Desktop, Cursor, Claude Code, or
+any host that launches MCP servers over stdio:
+
+```json
 {
   "mcpServers": {
     "filesystem": {
-      "command": "kams",
-      "args": ["shim", "--server", "filesystem", "--",
-               "npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "/path/to/kams",
+        "kams",
+        "shim",
+        "--server",
+        "filesystem",
+        "--",
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/tmp"
+      ]
     }
   }
 }
 ```
 
-Or reverse-proxy an HTTP MCP server — same detectors, same policy:
+The host still sees the upstream server's normal MCP interface. Kams adds the
+trust, telemetry, and policy boundary without requiring an SDK or agent-code
+change.
+
+### Streamable HTTP
+
+Front an HTTP MCP endpoint with the same detector and policy pipeline:
 
 ```bash
-kams proxy --upstream http://localhost:8000/mcp --server signoz-mcp --port 8900
-# then point the agent at http://localhost:8900/mcp
+uv run kams proxy \
+  --upstream http://localhost:8000/mcp \
+  --server signoz-mcp \
+  --host 127.0.0.1 \
+  --port 8900 \
+  --path /mcp
 ```
+
+Point the MCP client at `http://127.0.0.1:8900/mcp`. Kams preserves SSE
+streaming, headers, trace metadata, and per-request correlation, including
+concurrent clients that reuse the same JSON-RPC request ID.
+
+### SigNoz-origin containment proof
+
+Run the control plane and then the external-loop assertion:
 
 ```bash
-kams status              # what's recorded, and its trust state
-kams pin filesystem      # promote to pinned — drift is now a finding
-kams daemon              # control plane: SigNoz alerts -> enforcement
+uv run kams daemon --port 8787
+uv run kams-demo-alert
 ```
 
-## How the detection works
+`kams-demo-alert` disables reflex installation, waits for SigNoz's evaluator,
+and rejects a restriction from any origin other than `signoz`. It then makes
+the next MCP call and rejects the run unless the call is actually blocked.
+Foundry's ingestion and alert-evaluation delay can make this take up to five
+minutes.
 
-### Integrity — the supply-chain detector
+### Real Bedrock agent path
 
-The obvious approach is to hash the `tools/list` response. It does not work: servers legitimately reorder and add tools, so a whole-response hash fires on benign change, gets muted, and protects nobody.
-
-Instead, per-tool digests over a canonicalised `(name, description, inputSchema)` triple, with **typed** deltas so severity tracks the threat rather than the diff:
-
-| Change | Severity | Why |
-|---|---|---|
-| `DESCRIPTION_CHANGED` | **HIGH** | The poisoning vector — descriptions reach the model as instruction |
-| `SCHEMA_WIDENED` | MEDIUM | More surface for data to leave through |
-| `TOOL_ADDED` | MEDIUM | A new capability mid-session was in nobody's threat model |
-| `SCHEMA_NARROWED` | LOW | Usually a genuine fix |
-| `TOOL_REMOVED` | LOW | Availability, not security |
-
-**`kams.lock` is the missing lockfile.** Trust on first use records a *provisional* baseline; `kams pin` makes it an *assertion*. That distinction drives severity — the identical poisoned description scores **HIGH** provisional and **CRITICAL** pinned, because pinning is what makes drift an assertion violation.
-
-### Injection scoring
-
-"Changed" is not enough; we score *how alarming*, with no LLM in the path:
-
-- **invisible characters** — zero-width, bidi overrides, and `U+E0000–E007F` tag characters, a smuggling vector that renders as nothing and reaches the model intact
-- **model-directed imperatives** — "ignore previous", "do not tell the user"
-- **instruction blocks** — `<IMPORTANT>`, the shape Invariant Labs demonstrated
-- **exfiltration shapes**, **cross-tool references**, **high-entropy blobs**
-- **rewrite magnitude** — context, weighted low, never damning alone
-
-Signals combine with **noisy-OR** (`1 − Π(1 − wᵢsᵢ)`) rather than a weighted sum. They are largely independent, and one conclusive signal should carry a verdict without corroboration; a sum would dilute it among quieter ones and need clamping.
-
-Scoring runs over what a change **added**, so a description that always contained a URL does not fire.
-
-### Egress — what is leaving, and to whom
-
-MCP arguments carry your data into third-party code. Kams classifies what crosses
-that boundary: credential shapes (AWS, GitHub, Slack, Anthropic, OpenAI, JWTs,
-private keys), PII, Luhn-checked card numbers, and fields whose *name* implies a
-secret even when the value looks unremarkable — a field called `password` holding
-`hunter2` matches no pattern and is still a credential.
-
-Sensitivity is a property of the **(class, destination) pair**, not the payload.
-Credentials to any unvetted server has no benign reading; email addresses to a CRM
-server is expected. `policy.yaml` expresses that pairing; the detector only reports.
-
-Findings carry class, count, JSON path, and a **salted digest** — never the value.
-The salt is per-installation, so digests correlate locally and mean nothing once
-telemetry leaves the host. A test asserts no finding's serialised form contains any
-fixture secret, or any 16-character fragment of one.
-
-Redaction replaces matched spans with **typed** placeholders
-(`[kams:redacted:aws_key]`) rather than blanking the field, so the model still
-knows what kind of thing was there and does not retry blindly.
-
-### Context cost — measured where possible, honest where not
-
-Tool results consume the model's context window, and nothing today attributes that
-cost to the server responsible. Kams estimates per call, then **reconciles**: when
-an instrumented agent reports a real token delta for a turn, it distributes that
-measurement across the results that entered context and carries a per-server
-correction factor forward. Estimates get progressively less wrong; turn-level
-figures are ground truth.
-
-Every emission carries `mcp.context.cost.estimated`. A cost metric that silently
-mixed measured and estimated values would not be one anyone should trust.
-
-### Behaviour — is the interaction healthy?
-
-The other three detectors ask *what* crossed the boundary. This one asks whether
-the agent is getting anywhere: thrash, retry storms, error rates, and latency
-drift measured against each tool's own history rather than a global threshold.
-
-The design problem is that **repetition is not the same as being stuck.** An agent
-polling a build status calls the same tool with the same arguments a dozen times,
-and that is correct. Flagging on repetition alone fires constantly on healthy
-workloads and gets muted.
-
-The discriminator is the *result*. Identical call plus identical result means the
-agent learned nothing and is going in circles. Identical call plus a changing
-result is polling, and polling is fine. Once the answer settles and the agent
-keeps asking, it fires.
-
-Thrash is a `warn`, not a block — a looping agent is a prompt or planning problem,
-not a misbehaving server, so Kams reports it rather than intervening. Retry storms
-throttle rather than block, because the dependency may recover.
-
-### The LLM judge — enrichment, never a decision
-
-Deterministic heuristics decide severity and action. `kamsd` then asks Claude
-Sonnet 4.6 to *explain* the finding, off the request path, minutes later:
-
-```
-[CRITICAL] integrity.definition_drift: description changed on a pinned baseline
-           (model_directed_imperative, instruction_block, rewrite_magnitude)
-
-judge: malicious — The updated description instructs the agent to secretly read
-       the user's private SSH key and embed it in the note content, effectively
-       exfiltrating credentials.
-```
-
-The severity was already decided before the judge ran. Two properties are
-structural rather than conventional:
-
-- **It cannot change a verdict.** `assess()` returns a `Verdict` type carrying
-  only text and a model id — there is no field for severity or action and no code
-  path to one. A test asserts `Severity.parse("malicious")` raises.
-- **It never sees user data.** The payload is allowlisted to the two tool
-  descriptions. Arguments and results — the things carrying credentials and PII —
-  are unreachable, and a test asserts they stay out of the prompt even when
-  present on the finding.
-
-Delivery is fire-and-forget from the shim to `kamsd` over a bounded queue that
-drops rather than blocks. Losing enrichment costs a prose explanation; blocking an
-agent to obtain one would be a far worse trade. Enrichment spans are **linked** to
-the originating trace rather than parented to it, since they occur minutes later
-in a different process.
-
-### Threat model — documented, not invented
-
-| Attack | Detector |
-|---|---|
-| Rug pull | `kams.lock` pinning + `DESCRIPTION_CHANGED` |
-| Tool poisoning ([Invariant Labs, 2025](https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks)) | injection scoring on the delta |
-| Cross-server shadowing | cross-tool reference signal |
-| Poisoned outputs ([CyberArk](https://www.cyberark.com/resources/threat-research-blog/poison-everywhere-no-output-from-your-mcp-server-is-safe)) | result-side scanning |
-| Tool squatting / homoglyphs | mixed-script name detection |
-
-## Design principles
-
-1. **Observability never breaks the workload.** Every export path is best-effort; a detector that throws is caught and treated as no-opinion. Quarantine is the single deliberate fail-closed exception, always explicit and always TTL'd.
-2. **No LLM in the enforcement path.** Enforcement is deterministic and reproducible in a unit test. LLM judgement is enrichment, computed off the critical path, and cannot change a severity or an action.
-3. **Detection is declarative.** Detectors emit typed findings; `policy.yaml` maps findings to actions. Changing what Kams *does* about a threat never means changing Kams.
-4. **Never log a secret to prove a secret leaked.** Egress findings carry class, count, and a salted digest — never values.
-5. **Degrade, don't disappear.** Missing trace context, an uncooperative agent, an unknown method — each drops one capability and keeps the rest.
-
-Full design: [`architecture.md`](architecture.md).
-
-## Transparency is tested, not asserted
-
-Everything rests on the agent being unable to tell Kams is there. `tests/golden/` runs an identical transcript with and without the proxy and asserts the streams are **byte-identical** — covering non-alphabetical key order, emoji, a 200KB payload past the default stream limit, error `data`, and unknown methods.
-
-HTTP widens that guarantee to status codes and headers, since an HTTP client observes all three. `Mcp-Session-Id` is load-bearing and must survive; hop-by-hop headers must not. And SSE responses must stay *streamed* — a proxy that buffered a stream to inspect it would turn incremental delivery into batched delivery, invisible in a body comparison and obvious to an agent rendering tokens live. That case is asserted against the generator directly, because `httpx.ASGITransport` buffers and would pass either way.
-
-Messages carry their original bytes and are forwarded unmodified unless a hook explicitly rewrites them. Parsing is for observation only. Re-serialising everything would silently reorder keys and change unicode escaping — invisible when diffing parsed objects, very visible to anything hashing the wire.
+With `AMAZON_BEDROCK_API_KEY` configured:
 
 ```bash
-uv run pytest        # 182 tests
+uv run kams-demo-agent
 ```
 
-The false-positive suite is the load-bearing half. Ordinary tool prose containing "you must", "do not", URLs, and imperatives must stay quiet — and does.
+The runner calls Amazon Bedrock Converse, executes the model-selected MCP tool
+through Kams, feeds the explicit policy error back into the conversation, and
+reconciles estimated tool-result cost against the provider's input-token delta.
+It makes live provider calls and may incur charges.
 
-## Contributing upstream
+## Project layout
 
-[`src/kams/semconv/mcp.yaml`](src/kams/semconv/mcp.yaml) is a semantic-convention model file for MCP, written to OpenTelemetry's own schema for submission to `open-telemetry/semantic-conventions-genai`. Two gaps it addresses:
-
-**Trace context propagation.** MCP defines no mechanism — the stdio transport has no headers. Kams proposes W3C `traceparent` inside `params._meta`, which the MCP spec reserves for out-of-band metadata. Agents that don't participate get spans marked `mcp.trace.propagated=false` rather than silently-rooted ones, because a broken propagation chain otherwise looks exactly like a working one.
-
-**Context-cost attribution.** Tool results consume the model's context window, but nothing attributes that cost back to the server responsible. Kams proposes `mcp.context.cost.tokens` with a mandatory `mcp.context.cost.estimated` discriminator — a cost metric that silently mixes measured and estimated values is not trustworthy.
-
-## Repository
-
-```
-casting.yaml{,.lock}   Foundry deployment of SigNoz (MCP server enabled)
-policy.yaml            declarative enforcement rules
-kams.lock              pinned tool definitions
+```text
 src/kams/
-  transport/           stdio + streamable-HTTP adapters — no logic
-  protocol/            JSON-RPC framing, MCP shapes, _meta handling
-  detect/              integrity, injection, egress, cost, behavioural — pure
-  policy/              parser + evaluator — pure
-  telemetry/           spans, metrics, semconv constants
-  semconv/mcp.yaml     the upstream-able model file
-demo/                  rug-pulling server + narrated scenario
-tests/golden/          byte-transparency guarantees
+  shim/interceptor.py       # shared request correlation, detection, policy, telemetry
+  transport/                # byte-faithful stdio and streamable-HTTP adapters
+  detect/                   # integrity, egress, context-cost, and behavioural findings
+  policy/                   # ordered rules, actions, rate windows, shared restrictions
+  telemetry/                # MCP semconv, OTLP traces, metrics, and correlated logs
+  daemon/                   # SigNoz webhook, atomic state, optional LLM enrichment
+  protocol/                 # JSON-RPC and MCP message handling
+  cli.py                    # shim | proxy | pin | status | daemon
+demo/                       # rogue server, deterministic proof, alert loop, Bedrock agent
+provisioning/               # dashboard and critical alert JSON applied through SigNoz MCP
+docs/                       # architecture, screenshots, and generated project assets
+web/                        # Next.js + MDX documentation site
+tests/                      # detector, policy, telemetry-contract, and wire-level coverage
+casting.yaml{,.lock}        # reproducible SigNoz Foundry deployment
+policy.yaml                 # declarative, TTL-bound enforcement rules
+kams.lock                   # generated MCP tool-definition assertions
+kams-state.json             # generated cross-process restriction state
 ```
-
-`detect/` and `policy/` are pure — no I/O, no network, no ambient clock. The brain is testable without Docker, SigNoz, or Bedrock.
-
-## Status
-
-**Working, end to end:** transparent stdio relay; semconv telemetry into SigNoz; integrity detection with `kams.lock` pinning; deterministic injection scoring; egress classification with redaction; context-cost attribution; declarative policy; reflex enforcement; the SigNoz alert → webhook → quarantine control loop; dashboards and alerts provisioned as versioned code.
-
-Known limits, stated plainly:
-
-- Enforcement applies to calls issued *after* a finding is processed. MCP permits pipelining, so a burst issued before the `tools/list` response is handled can slip through within a single connection. Standing state in `kamsd` closes this across connections, but not within one.
-- Context cost is an **estimate** until an instrumented agent reports a measured token delta. Every emission carries `mcp.context.cost.estimated` so the two are never confused, and the estimator calibrates per server once ground truth arrives.
-- The webhook trusts its network position. It has no signature verification, which is fine for a loopback deployment and would not be for an exposed one.
 
 ## AI assistance
 
-Kams was built with **Claude Code (Claude Opus 5)** as an AI coding assistant, used for implementation, test authoring, and documentation throughout. This is disclosed as the hackathon rules require.
+Kams was initially designed and implemented with **Claude Code**. **OpenAI
+Codex** subsequently audited and hardened the project, expanded its tests,
+verified the live SigNoz control loop, and prepared submission and documentation
+assets. This disclosure is retained explicitly for the hackathon rules.
 
-## Licence
+## License
 
-MIT.
+MIT — see [`LICENSE`](LICENSE).

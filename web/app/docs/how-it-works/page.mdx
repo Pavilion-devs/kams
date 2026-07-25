@@ -1,0 +1,115 @@
+export const metadata = {
+  title: "How Kams works",
+  description:
+    "The five steps: intercept, observe, detect, alert, contain — and the request lifecycle that connects them.",
+};
+
+<Eyebrow>Core concepts</Eyebrow>
+
+# How Kams works
+
+<Lede>
+Kams has a data plane that sits on the MCP wire and a control plane that never touches
+it. Five steps connect them.
+</Lede>
+
+<ArchitectureDiagram framed className="my-8" />
+
+## The five steps
+
+<Steps>
+  <Step title="Intercept">
+    A transport adapter — the stdio relay or the streamable-HTTP proxy — sits between the
+    agent and the upstream server. Both hand messages to the **same** `Interceptor`, which
+    owns correlation, detection, policy, and telemetry. Transport adapters own only I/O.
+  </Step>
+
+  <Step title="Observe">
+    Each request opens an OpenTelemetry CLIENT span that stays open until the matching
+    response arrives. Kams extracts inbound W3C trace context from `params._meta`, starts
+    its own span, and reinjects the child context upstream while preserving unrelated
+    `_meta` keys.
+  </Step>
+
+  <Step title="Detect">
+    Detectors return immutable, typed findings — kind, severity, stable detector ID,
+    server, tool, safe summary, redacted evidence, confidence. They are pure: no I/O, no
+    clock, no network. **Detectors never decide actions.**
+  </Step>
+
+  <Step title="Alert">
+    Findings become span events, metrics, and correlated OTLP logs. SigNoz evaluates a
+    narrow rule across the fleet and over time — conditions the shim cannot express,
+    because it only ever sees one connection right now.
+  </Step>
+
+  <Step title="Contain">
+    Either the local reflex path or the SigNoz webhook writes a TTL-bound restriction into
+    shared state. The next `tools/call` is checked before forwarding and, if restricted,
+    answered with an explicit JSON-RPC error plus its own enforcement span.
+  </Step>
+</Steps>
+
+## Request lifecycle
+
+```text
+agent ──▶ tools/call + params._meta trace context
+          │
+          ├─ extract context, open CLIENT span
+          ├─ check standing restriction ──▶ blocked? emit enforcement span, return error
+          ├─ inspect egress, apply deterministic policy
+          ├─ forward original or explicitly redacted request + child context
+          │
+upstream ─┴─▶ response
+          │
+          ├─ integrity / result / cost / behaviour checks
+          ├─ span events + metrics + correlated log
+          └─▶ agent
+```
+
+Two properties are easy to get wrong and worth stating:
+
+- **Responses can arrive out of order.** Correlation is by a transport-local token plus
+  the JSON-RPC ID, never by arrival order. HTTP assigns a distinct token per request, so
+  two concurrent clients can both use `id=1` without one response closing the other's span.
+- **A response may never arrive.** Unpaired spans are closed at shutdown and marked
+  `kams.response.missing`, rather than leaking or silently vanishing from the trace.
+
+## Faithful forwarding
+
+The original JSON bytes are forwarded unmodified unless Kams intentionally injects trace
+context or applies a redaction. Golden wire tests prove byte identity in observation-only
+mode across ordering, Unicode, 200 KB payloads, errors, SSE streaming, headers, and
+concurrent clients.
+
+<Callout type="note" title="Why one interceptor">
+Wiring a detector into stdio and forgetting it on HTTP would be a silent security hole
+that no test would notice. The pipeline is built once in `_build_pipeline()` and handed to
+both transports, which makes that class of bug structurally impossible.
+</Callout>
+
+## The control plane is not on the request path
+
+The daemon receives SigNoz webhooks and writes shared state. It is deliberately **not** a
+dependency of normal MCP traffic:
+
+| Failure | Behaviour |
+|---|---|
+| SigNoz or OTLP unavailable | Export retries, buffers, then drops. MCP continues |
+| Webhook daemon unavailable | No new alert-origin restriction; reflex policy still works |
+| Detector or policy raises | Logged, treated fail-open |
+| Shared-state file unreadable | Treated as empty |
+| Upstream dies | Protocol error reaches the client; pending span closes as an error |
+| No incoming trace context | Valid root span with `kams.trace.propagated=false` |
+| LLM judge unavailable | Deterministic finding and action unchanged |
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Tool-definition integrity" icon="solar:pin-linear" href="/docs/integrity">
+    Why pinning converts a remembered sample into a human assertion.
+  </Card>
+  <Card title="The control loop" icon="solar:refresh-circle-linear" href="/docs/control-loop">
+    Two paths, one restriction shape, and the `--no-reflex` proof.
+  </Card>
+</CardGroup>

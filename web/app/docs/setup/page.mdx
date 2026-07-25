@@ -1,0 +1,116 @@
+export const metadata = {
+  title: "Installation & setup",
+  description:
+    "Requirements, the Foundry SigNoz deployment, environment variables, and the files Kams creates on disk.",
+};
+
+<Eyebrow>Getting started</Eyebrow>
+
+# Installation &amp; setup
+
+<Lede>
+What Kams needs, what it installs, and every file it writes to your working directory.
+</Lede>
+
+## Requirements
+
+<CardGroup cols={2}>
+  <Card title="Docker" icon="solar:box-linear">
+    Runs the SigNoz stack. Budget ~3.5 GB for the first image pull.
+  </Card>
+  <Card title="Python 3.12+ and uv" icon="solar:code-square-linear">
+    Kams targets `>=3.12`. [uv](https://docs.astral.sh/uv/) manages the environment and
+    the console scripts.
+  </Card>
+</CardGroup>
+
+## Install
+
+```bash
+./scripts/bootstrap.sh
+uv sync
+```
+
+`bootstrap.sh` deploys SigNoz through Foundry using the pinned `casting.yaml` and
+`casting.yaml.lock`, creates the first organisation if one does not exist, and then polls
+until the OTLP endpoint is genuinely accepting data. Waiting on real ingestion rather
+than on container health is deliberate — a container that is "up" but not yet ingesting
+produces a confusing empty dashboard.
+
+`uv sync` installs the package and puts three commands on your path:
+
+| Command | Purpose |
+|---|---|
+| `kams` | The CLI: `shim`, `proxy`, `pin`, `status`, `daemon` |
+| `kams-demo-agent` | The real Amazon Bedrock agent loop |
+| `kams-demo-alert` | The external control-loop proof |
+
+## Environment
+
+Copy the example file and set at minimum the SigNoz API key:
+
+```bash
+cp .env.example .env
+```
+
+| Variable | Required for | Notes |
+|---|---|---|
+| `SIGNOZ_API_KEY` | `scripts/provision.py`, `kams-demo-alert` | Create in **Settings → API Keys** |
+| `AMAZON_BEDROCK_API_KEY` | `kams-demo-agent`, LLM judge | Live calls may incur provider charges |
+| `KAMS_LOG_LEVEL` | all commands | Overridden by `--log-level` |
+
+<Callout type="note" title="OTLP endpoint">
+Kams defaults to the local SigNoz OTLP gRPC endpoint. Point it elsewhere per-command with
+`--otlp-endpoint`, which every telemetry-emitting subcommand accepts.
+</Callout>
+
+## Provision SigNoz as code
+
+```bash
+uv run python scripts/provision.py
+```
+
+This applies three versioned artifacts through SigNoz's own MCP server:
+
+- `provisioning/dashboards/kams-mcp.json` — the nine-panel dashboard
+- `provisioning/alerts/integrity-critical.json` — the deliberately narrow critical alert
+- a webhook notification channel pointed at the Kams daemon
+
+Re-running it updates in place rather than duplicating, so the JSON files stay the source
+of truth.
+
+## Files Kams writes
+
+Kams keeps its state as small, inspectable files in the working directory rather than in
+a database or a daemon's memory.
+
+| File | Written by | Purpose |
+|---|---|---|
+| `kams.lock` | `shim`, `proxy`, `pin` | Pinned and provisional tool definitions |
+| `kams-state.json` | policy engine, `daemon` | Standing TTL-bound restrictions |
+| `.kams-salt` | egress classifier | Per-installation salt for egress digests |
+| `policy.yaml` | you | Declarative rules; ships with sensible defaults |
+
+<Callout type="tip" title="Why files">
+`cat kams-state.json` answers "why is this server blocked?" without attaching a debugger
+to a daemon — and a shim keeps working when the daemon is not running at all. See
+[Shared state &amp; TTL](/docs/shared-state).
+</Callout>
+
+The salt is generated on first use with `0o600` permissions and never leaves the host. It
+makes egress digests correlate locally — the same secret seen at two call sites gets the
+same digest — while being meaningless once telemetry leaves the machine.
+
+## Verify
+
+```bash
+uv run pytest
+kams status
+```
+
+The test suite covers detector negatives, secret-leak assertions, policy rate-window
+recovery, trace and baggage preservation, the metric contract, byte transparency on both
+transports, HTTP/SSE behaviour, and concurrent request correlation.
+
+`kams status` prints every recorded server, its trust state, per-tool digests, and any
+standing restriction with its origin and remaining TTL.
