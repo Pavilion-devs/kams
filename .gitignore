@@ -27,3 +27,7 @@ build/
 docs/examples/  # foundryctl gen examples output — reference only, not ours
 kams-state.json
 .kams-salt
+
+# Our own test runs regenerate this. In real use you COMMIT your kams.lock —
+# it is the pinned tool-definition lockfile and belongs in review.
+kams.lock
