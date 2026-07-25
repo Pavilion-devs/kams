@@ -71,12 +71,27 @@ class MCPClient:
         return json.loads(line) if line else {}
 
     async def stderr_text(self) -> str:
+        """Drain whatever the shim has written so far.
+
+        Deliberately NOT `read()` to EOF: the child is still running, so that
+        blocks until the timeout and then *discards everything it buffered*
+        when the read task is cancelled. That silently loses findings and makes
+        a working detector look broken — which cost real debugging time once.
+
+        Reading in bounded chunks keeps whatever arrived.
+        """
         if not self.proc or not self.proc.stderr:
             return ""
-        try:
-            return (await asyncio.wait_for(self.proc.stderr.read(), timeout=2)).decode(errors="replace")
-        except asyncio.TimeoutError:
-            return ""
+        chunks: list[bytes] = []
+        while True:
+            try:
+                chunk = await asyncio.wait_for(self.proc.stderr.read(4096), timeout=0.4)
+            except asyncio.TimeoutError:
+                break
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return b"".join(chunks).decode(errors="replace")
 
 
 def shim_cmd() -> list[str]:

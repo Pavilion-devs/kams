@@ -90,6 +90,35 @@ rules:
     action: redact_args
     reason: Personal data redacted before leaving the process.
 
+  # --- behaviour ---------------------------------------------------------------
+  # A dependency failing every call is not going to start working because the
+  # agent asked a fifth time. Throttle rather than block: the server may recover,
+  # and a TTL'd rate limit degrades gracefully where a block does not.
+
+  - name: throttle-retry-storm
+    match:
+      detector: behavioural.retry_storm
+      min_severity: HIGH
+    action: rate_limit
+    rate: 4/min
+    ttl: 10m
+    reason: Consecutive failures against the same tool — retrying harder will not help.
+
+  - name: warn-on-agent-thrash
+    match:
+      detector: behavioural.thrash
+    action: warn
+    reason: >-
+      Identical calls returning identical results. The agent is burning tokens
+      without making progress; this is a prompt or planning problem, not a
+      server problem, so Kams reports rather than intervenes.
+
+  - name: warn-on-error-rate
+    match:
+      detector: behavioural.error_rate
+    action: warn
+    reason: Elevated error rate for this server over the recent window.
+
   # --- cost ------------------------------------------------------------------
 
   - name: throttle-context-cost-runaway

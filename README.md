@@ -152,6 +152,26 @@ figures are ground truth.
 Every emission carries `mcp.context.cost.estimated`. A cost metric that silently
 mixed measured and estimated values would not be one anyone should trust.
 
+### Behaviour — is the interaction healthy?
+
+The other three detectors ask *what* crossed the boundary. This one asks whether
+the agent is getting anywhere: thrash, retry storms, error rates, and latency
+drift measured against each tool's own history rather than a global threshold.
+
+The design problem is that **repetition is not the same as being stuck.** An agent
+polling a build status calls the same tool with the same arguments a dozen times,
+and that is correct. Flagging on repetition alone fires constantly on healthy
+workloads and gets muted.
+
+The discriminator is the *result*. Identical call plus identical result means the
+agent learned nothing and is going in circles. Identical call plus a changing
+result is polling, and polling is fine. Once the answer settles and the agent
+keeps asking, it fires.
+
+Thrash is a `warn`, not a block — a looping agent is a prompt or planning problem,
+not a misbehaving server, so Kams reports it rather than intervening. Retry storms
+throttle rather than block, because the dependency may recover.
+
 ### Threat model — documented, not invented
 
 | Attack | Detector |
@@ -181,7 +201,7 @@ HTTP widens that guarantee to status codes and headers, since an HTTP client obs
 Messages carry their original bytes and are forwarded unmodified unless a hook explicitly rewrites them. Parsing is for observation only. Re-serialising everything would silently reorder keys and change unicode escaping — invisible when diffing parsed objects, very visible to anything hashing the wire.
 
 ```bash
-uv run pytest        # 143 tests
+uv run pytest        # 164 tests
 ```
 
 The false-positive suite is the load-bearing half. Ordinary tool prose containing "you must", "do not", URLs, and imperatives must stay quiet — and does.
@@ -203,7 +223,7 @@ kams.lock              pinned tool definitions
 src/kams/
   transport/           stdio + streamable-HTTP adapters — no logic
   protocol/            JSON-RPC framing, MCP shapes, _meta handling
-  detect/              integrity, injection, egress, cost — pure
+  detect/              integrity, injection, egress, cost, behavioural — pure
   policy/              parser + evaluator — pure
   telemetry/           spans, metrics, semconv constants
   semconv/mcp.yaml     the upstream-able model file

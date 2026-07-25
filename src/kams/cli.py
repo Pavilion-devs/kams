@@ -44,6 +44,8 @@ def main(argv: list[str] | None = None) -> int:
     shim.add_argument("--otlp-endpoint", default=None, help="OTLP gRPC endpoint")
     shim.add_argument("--lock", default="kams.lock", help="path to the pinned tool-definition lockfile")
     shim.add_argument("--no-integrity", action="store_true", help="disable the integrity detector")
+    shim.add_argument("--no-behavioural", action="store_true",
+                       help="disable thrash / retry-storm / latency detection")
     shim.add_argument("--no-egress", action="store_true", help="disable sensitive-data classification")
     shim.add_argument("--policy", default="policy.yaml", help="path to the policy file")
     shim.add_argument("--no-enforce", action="store_true", help="observe only; never block")
@@ -70,6 +72,8 @@ def main(argv: list[str] | None = None) -> int:
     proxy.add_argument("--policy", default="policy.yaml")
     proxy.add_argument("--state", default="kams-state.json")
     proxy.add_argument("--no-integrity", action="store_true")
+    proxy.add_argument("--no-behavioural", action="store_true",
+                       help="disable thrash / retry-storm / latency detection")
     proxy.add_argument("--no-egress", action="store_true")
     proxy.add_argument("--no-enforce", action="store_true")
     proxy.add_argument("--log-level", default=os.environ.get("KAMS_LOG_LEVEL", "info"))
@@ -162,6 +166,7 @@ def _build_pipeline(args):
     would be a silent hole that no test would notice.
     """
     from kams.detect.baseline import BaselineStore
+    from kams.detect.behavioural import BehaviouralDetector
     from kams.detect.cost import ContextCostEstimator
     from kams.detect.integrity import IntegrityDetector
 
@@ -190,7 +195,8 @@ def _build_pipeline(args):
             policy = Policy.permissive()
         engine = PolicyEngine(policy, shared=SharedState(args.state))
 
-    return store, integrity, egress, engine, ContextCostEstimator()
+    behavioural = None if getattr(args, "no_behavioural", False) else BehaviouralDetector()
+    return store, integrity, egress, engine, ContextCostEstimator(), behavioural
 
 
 def _name_from_url(url: str) -> str:
@@ -207,10 +213,10 @@ def _run_proxy(args) -> int:
     server_name = args.server or _name_from_url(args.upstream)
     tracing.setup("kams-shim", endpoint=args.otlp_endpoint, extra_resource={"kams.server": server_name})
 
-    store, integrity, egress, engine, cost = _build_pipeline(args)
+    store, integrity, egress, engine, cost, behavioural = _build_pipeline(args)
     interceptor = Interceptor(
         server_name, integrity=integrity, policy=engine, egress=egress,
-        cost=cost, transport="http",
+        cost=cost, behavioural=behavioural, transport="http",
     )
     relay = HttpRelay(
         args.upstream,
@@ -245,10 +251,11 @@ async def _run_shim(args, upstream: list[str]) -> int:
 
     tracing.setup("kams-shim", endpoint=args.otlp_endpoint, extra_resource={"kams.server": server_name})
 
-    store, integrity, egress, engine, cost = _build_pipeline(args)
+    store, integrity, egress, engine, cost, behavioural = _build_pipeline(args)
 
     interceptor = Interceptor(
-        server_name, integrity=integrity, policy=engine, egress=egress, cost=cost
+        server_name, integrity=integrity, policy=engine, egress=egress,
+        cost=cost, behavioural=behavioural,
     )
     relay = StdioRelay(
         upstream,

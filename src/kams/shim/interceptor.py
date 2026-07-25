@@ -37,6 +37,7 @@ class _Pending:
     tool: str | None
     started: float
     request_bytes: int
+    arguments: Any = None
     # Detector output attached on the request side, applied when the span closes.
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -59,6 +60,7 @@ class Interceptor:
         policy: Any | None = None,
         egress: Any | None = None,
         cost: Any | None = None,
+        behavioural: Any | None = None,
         transport: str = "stdio",
     ) -> None:
         self.server_name = server_name
@@ -67,6 +69,7 @@ class Interceptor:
         self.policy = policy
         self.egress = egress
         self.cost = cost
+        self.behavioural = behavioural
         # Set by whichever adapter constructed us. Hardcoding this meant
         # HTTP traffic was reported as stdio, which is worse than omitting
         # the attribute entirely.
@@ -234,6 +237,10 @@ class Interceptor:
             tool=tool,
             started=time.perf_counter(),
             request_bytes=len(msg.raw),
+            # Kept so the behavioural detector can pair the call with its
+            # result -- identical call plus identical result is the loop
+            # signature, and it cannot be seen from either half alone.
+            arguments=mcp.tool_call_arguments(params) if method == mcp.TOOLS_CALL else None,
         )
 
         # Egress runs on the way out, while the data can still be stopped.
@@ -378,6 +385,19 @@ class Interceptor:
                 span.set_attribute(k, v)
 
             self._h_duration.record(elapsed, labels)
+
+            if self.behavioural is not None and pending.method == mcp.TOOLS_CALL and pending.tool:
+                behaviour = self.behavioural.record(
+                    self.server_name,
+                    pending.tool,
+                    arguments=pending.arguments,
+                    result=msg.result,
+                    is_error=msg.error is not None,
+                    duration=elapsed,
+                )
+                if behaviour:
+                    self._emit(span, behaviour)
+                    self._decide(span, behaviour)
         finally:
             span.end()
 
