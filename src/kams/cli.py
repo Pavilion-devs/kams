@@ -36,6 +36,12 @@ def main(argv: list[str] | None = None) -> int:
     shim = sub.add_parser("shim", help="wrap an MCP server on stdio")
     shim.add_argument("--server", default=None, help="logical server name (defaults to the binary name)")
     shim.add_argument("--log-level", default=os.environ.get("KAMS_LOG_LEVEL", "warning"))
+    shim.add_argument(
+        "--no-telemetry",
+        action="store_true",
+        help="relay only, emit nothing (used by the golden transparency tests)",
+    )
+    shim.add_argument("--otlp-endpoint", default=None, help="OTLP gRPC endpoint")
 
     args = parser.parse_args(ours)
 
@@ -49,10 +55,33 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "shim":
         if not upstream:
             parser.error("shim requires an upstream command after `--`")
-        relay = StdioRelay(upstream)
-        return asyncio.run(relay.run())
+        return asyncio.run(_run_shim(args, upstream))
 
     return 1
+
+
+async def _run_shim(args, upstream: list[str]) -> int:
+    server_name = args.server or os.path.basename(upstream[0])
+
+    if args.no_telemetry:
+        return await StdioRelay(upstream).run()
+
+    from kams.shim.interceptor import Interceptor
+    from kams.telemetry import tracing
+
+    tracing.setup("kams-shim", endpoint=args.otlp_endpoint, extra_resource={"kams.server": server_name})
+    interceptor = Interceptor(server_name)
+
+    relay = StdioRelay(
+        upstream,
+        on_client_message=interceptor.on_client_message,
+        on_server_message=interceptor.on_server_message,
+    )
+    try:
+        return await relay.run()
+    finally:
+        interceptor.close()
+        tracing.shutdown()
 
 
 if __name__ == "__main__":
