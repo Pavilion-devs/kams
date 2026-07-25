@@ -56,10 +56,12 @@ class Interceptor:
         *,
         session_id: str | None = None,
         integrity: Any | None = None,
+        policy: Any | None = None,
     ) -> None:
         self.server_name = server_name
         self.session_id = session_id or uuid.uuid4().hex[:16]
         self.integrity = integrity
+        self.policy = policy
         self._tracer = tracing.tracer("kams.shim")
         self._pending: dict[str | int, _Pending] = {}
 
@@ -72,6 +74,61 @@ class Interceptor:
         self._c_drift = m.create_counter(
             sc.METRIC_INTEGRITY_DRIFT, description="Tool-definition drift and injection findings"
         )
+        self._c_enforce = m.create_counter(
+            sc.METRIC_ENFORCEMENT, description="Policy enforcement actions taken"
+        )
+
+    def _emit_enforcement(self, restriction, method: str, tool: str | None) -> None:
+        """A standalone span for the containment itself.
+
+        Separate from the blocked call's span so enforcement is visible in
+        SigNoz as an event in its own right — "what did Kams do, and under which
+        rule" is a different question from "what did the agent try".
+        """
+        try:
+            with self._tracer.start_as_current_span(
+                f"kams.enforce {restriction.action.value}",
+                kind=SpanKind.INTERNAL,
+                attributes={
+                    sc.KAMS_ENFORCE_ACTION: restriction.action.value,
+                    sc.KAMS_RULE_NAME: restriction.rule,
+                    sc.MCP_SERVER_NAME: restriction.server,
+                    sc.MCP_METHOD_NAME: method,
+                    sc.MCP_SESSION_ID: self.session_id,
+                    **({sc.MCP_TOOL_NAME: tool} if tool else {}),
+                    **({sc.KAMS_ENFORCE_TTL: int(restriction.expires_at - restriction.created_at)}
+                       if restriction.expires_at else {}),
+                },
+            ) as span:
+                span.set_status(Status(StatusCode.ERROR, restriction.reason[:200] or "blocked by policy"))
+            self._c_enforce.add(
+                1,
+                {"server": restriction.server, "action": restriction.action.value, "rule": restriction.rule},
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("failed to emit enforcement span: %r", exc)
+
+    def _decide(self, span, findings: list) -> None:
+        """Run findings through policy and install any standing restrictions."""
+        if self.policy is None or not findings:
+            return
+        try:
+            decisions = self.policy.evaluate(findings)
+            for restriction in self.policy.apply(decisions):
+                span.add_event(
+                    "kams.enforcement",
+                    attributes={
+                        sc.KAMS_ENFORCE_ACTION: restriction.action.value,
+                        sc.KAMS_RULE_NAME: restriction.rule,
+                        sc.MCP_SERVER_NAME: restriction.server,
+                    },
+                )
+                self._c_enforce.add(
+                    1,
+                    {"server": restriction.server, "action": restriction.action.value, "rule": restriction.rule},
+                )
+        except Exception as exc:  # noqa: BLE001 - policy must never break the relay
+            log.warning("policy evaluation failed, allowing: %r", exc)
 
     def _emit(self, span, findings: list) -> None:
         """Attach findings to the span as events and count them.
@@ -107,6 +164,23 @@ class Interceptor:
         method = msg.method or "unknown"
         params = msg.params
         tool = mcp.tool_call_name(params) if method == mcp.TOOLS_CALL else None
+
+        # Enforcement happens BEFORE the span is opened and before anything is
+        # forwarded. A blocked call must never reach the upstream server.
+        if self.policy is not None and method == mcp.TOOLS_CALL:
+            verdict = self.policy.check(self.server_name, tool)
+            if not verdict.allowed:
+                self._emit_enforcement(verdict.restriction, method, tool)
+                return HookResult.block(
+                    verdict.message,
+                    data={
+                        "kams": {
+                            "action": verdict.restriction.action.value,
+                            "rule": verdict.restriction.rule,
+                            "server": self.server_name,
+                        }
+                    },
+                )
 
         # Parent from the agent's trace context if it propagated one.
         traceparent, tracestate = mcp.extract_trace_context(params)
@@ -184,7 +258,9 @@ class Interceptor:
                     span.set_attribute(sc.MCP_TOOL_COUNT, len(tools))
                     if self.integrity is not None:
                         baseline = self.integrity.store.get(self.server_name)
-                        self._emit(span, self.integrity.on_tools_list(self.server_name, tools))
+                        findings = self.integrity.on_tools_list(self.server_name, tools)
+                        self._emit(span, findings)
+                        self._decide(span, findings)
                         span.set_attribute(
                             sc.KAMS_BASELINE_STATE,
                             baseline.state if baseline else "first_sighting",
@@ -195,7 +271,9 @@ class Interceptor:
                     # server output reaches the model's context.
                     texts = mcp.extract_result_text(msg.result)
                     if texts:
-                        self._emit(span, self.integrity.on_result_text(self.server_name, pending.tool, texts))
+                        findings = self.integrity.on_result_text(self.server_name, pending.tool, texts)
+                        self._emit(span, findings)
+                        self._decide(span, findings)
 
             if pending.method == mcp.TOOLS_CALL:
                 self._c_calls.add(1, labels)

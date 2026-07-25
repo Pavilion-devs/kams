@@ -1,0 +1,101 @@
+# Kams policy — what to do about findings.
+#
+# Rules are evaluated in file order and the first match wins, so this file reads
+# top to bottom exactly the way it executes. Findings that match no rule are
+# still recorded: observation and enforcement are separate concerns, and Kams is
+# fully useful with every rule below deleted.
+#
+# Actions: allow | warn | redact_args | rate_limit | block_tool | quarantine_server
+
+version: 1
+
+defaults:
+  action: allow
+  # Fail open. If Kams cannot decide, the workload proceeds. Observability must
+  # never be the reason an agent stops working (principle 1). Quarantine is the
+  # single deliberate exception, and it is always explicit and always TTL'd.
+  fail_mode: open
+
+thresholds:
+  integrity.description_delta:
+    high: 0.55
+    medium: 0.30
+
+rules:
+  # --- supply chain ----------------------------------------------------------
+
+  # A pinned definition that changes into something reading as model-directed
+  # instructions is the rug pull. Contain the server, do not merely log it.
+  - name: quarantine-poisoned-pinned-definition
+    match:
+      kind: INTEGRITY_DRIFT
+      severity: [CRITICAL]
+      min_confidence: 0.6
+    action: quarantine_server
+    ttl: 1h
+    reason: >-
+      A pinned tool definition changed into text that reads as prompt injection.
+      This is the documented rug-pull shape: the definition a human approved is
+      not the definition now being served.
+
+  # Homoglyph names and invisible-character payloads have no benign explanation
+  # in server-authored metadata.
+  - name: quarantine-homoglyph-squatting
+    match:
+      detector: integrity.tool_squatting
+      min_severity: HIGH
+    action: quarantine_server
+    ttl: 1h
+    reason: A tool name mixes character scripts, which renders identically to an ASCII name.
+
+  # Injection inside a *result*, not a description. Block the tool rather than
+  # the server: results are per-call, and one poisoned response does not mean
+  # every tool on the server is compromised.
+  - name: block-tool-on-result-injection
+    match:
+      detector: integrity.result_injection
+      min_severity: HIGH
+    action: block_tool
+    ttl: 15m
+    reason: Tool output contained instructions addressed to the model rather than data.
+
+  # Drift on a baseline nobody vouched for. Worth surfacing, not worth
+  # containing — we never asserted the original was good.
+  - name: warn-on-provisional-drift
+    match:
+      kind: INTEGRITY_DRIFT
+      severity: [HIGH, MEDIUM]
+    action: warn
+    reason: Tool definitions changed on a provisional baseline. Review, then `kams pin`.
+
+  # --- data egress -----------------------------------------------------------
+  # Sensitivity is a property of the (class, destination) pair, not the payload.
+  # Credentials reaching any unvetted third party is the case with no benign reading.
+
+  - name: block-credential-egress
+    match:
+      kind: EGRESS_SENSITIVE
+      classes: [aws_key, private_key, jwt, bearer_token]
+    unless:
+      server: [vault-mcp]
+    action: block_tool
+    reason: Credential-shaped data was about to be sent to a third-party MCP server.
+
+  - name: redact-pii-to-untrusted
+    match:
+      kind: EGRESS_SENSITIVE
+      classes: [email, phone]
+    unless:
+      server: [crm-mcp]
+    action: redact_args
+    reason: Personal data redacted before leaving the process.
+
+  # --- cost ------------------------------------------------------------------
+
+  - name: throttle-context-cost-runaway
+    match:
+      kind: COST_SPIKE
+      min_severity: HIGH
+    action: rate_limit
+    rate: 6/min
+    reason: This server's results are consuming a disproportionate share of the context window.

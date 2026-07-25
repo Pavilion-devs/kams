@@ -44,6 +44,8 @@ def main(argv: list[str] | None = None) -> int:
     shim.add_argument("--otlp-endpoint", default=None, help="OTLP gRPC endpoint")
     shim.add_argument("--lock", default="kams.lock", help="path to the pinned tool-definition lockfile")
     shim.add_argument("--no-integrity", action="store_true", help="disable the integrity detector")
+    shim.add_argument("--policy", default="policy.yaml", help="path to the policy file")
+    shim.add_argument("--no-enforce", action="store_true", help="observe only; never block")
 
     pin = sub.add_parser(
         "pin",
@@ -100,7 +102,21 @@ async def _run_shim(args, upstream: list[str]) -> int:
         store = BaselineStore(args.lock)
         integrity = IntegrityDetector(store)
 
-    interceptor = Interceptor(server_name, integrity=integrity)
+    engine = None
+    if not args.no_enforce:
+        from kams.policy.engine import PolicyEngine
+        from kams.policy.model import Policy
+
+        try:
+            policy = Policy.load(args.policy) if os.path.exists(args.policy) else Policy.permissive()
+        except Exception as exc:  # noqa: BLE001
+            # A malformed policy must not stop the agent. Fall back to
+            # observe-only and say so loudly (principle 1).
+            print(f"kams: policy {args.policy} unreadable ({exc}); observing only", file=sys.stderr)
+            policy = Policy.permissive()
+        engine = PolicyEngine(policy)
+
+    interceptor = Interceptor(server_name, integrity=integrity, policy=engine)
     relay = StdioRelay(
         upstream,
         on_client_message=interceptor.on_client_message,
