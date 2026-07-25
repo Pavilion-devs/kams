@@ -1,0 +1,28 @@
+[project]
+name = "kams"
+version = "0.1.0"
+description = "OpenTelemetry-native observability and control layer for the Model Context Protocol"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic[bedrock,mcp]>=0.70",
+    "boto3>=1.35",
+    "mcp>=1.2",
+    "opentelemetry-sdk>=1.29",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.29",
+    "opentelemetry-api>=1.29",
+    "python-dotenv>=1.0",
+    "httpx>=0.27",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kams"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]

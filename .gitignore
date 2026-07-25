@@ -1,0 +1,27 @@
+# Secrets — the Bedrock bearer token lives here. Never commit.
+.env
+.env.*
+!.env.example
+
+# Foundry generated output. `casting.yaml` and `casting.yaml.lock` ARE committed
+# (hackathon rules require them); `pours/` is regenerable via `foundryctl forge`.
+pours/
+*.log
+
+# Kams runtime state
+kams.sock
+*.sqlite
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# macOS
+.DS_Store
+docs/examples/  # foundryctl gen examples output — reference only, not ours

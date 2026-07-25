@@ -1,0 +1,14 @@
+apiVersion: v1alpha1
+kind: Installation
+metadata:
+  name: signoz
+spec:
+  deployment:
+    mode: docker
+    flavor: compose
+  # Kams needs SigNoz's own MCP server running: it is both a provisioning
+  # surface (dashboards/alerts as code) and the dogfood target — we point the
+  # interceptor at it and observe SigNoz's MCP inside SigNoz.
+  mcp:
+    spec:
+      enabled: true
