@@ -57,11 +57,15 @@ class Interceptor:
         session_id: str | None = None,
         integrity: Any | None = None,
         policy: Any | None = None,
+        egress: Any | None = None,
+        cost: Any | None = None,
     ) -> None:
         self.server_name = server_name
         self.session_id = session_id or uuid.uuid4().hex[:16]
         self.integrity = integrity
         self.policy = policy
+        self.egress = egress
+        self.cost = cost
         self._tracer = tracing.tracer("kams.shim")
         self._pending: dict[str | int, _Pending] = {}
 
@@ -76,6 +80,13 @@ class Interceptor:
         )
         self._c_enforce = m.create_counter(
             sc.METRIC_ENFORCEMENT, description="Policy enforcement actions taken"
+        )
+        self._c_egress = m.create_counter(
+            sc.METRIC_EGRESS_CLASSIFIED, description="Sensitive values crossing into a third-party server"
+        )
+        self._h_cost = m.create_histogram(
+            sc.METRIC_CONTEXT_COST, unit="{token}",
+            description="Model-context tokens consumed by MCP results, by server",
         )
 
     def _emit_enforcement(self, restriction, method: str, tool: str | None) -> None:
@@ -150,6 +161,10 @@ class Interceptor:
                         **({"tool": f.tool} if f.tool else {}),
                     },
                 )
+                if f.kind.value == "EGRESS_SENSITIVE":
+                    for cls in f.evidence.get("classes") or []:
+                        self._c_egress.add(1, {"server": f.server, "class": cls,
+                                               **({"tool": f.tool} if f.tool else {})})
                 log.warning("[%s] %s: %s", f.severity.name, f.detector, f.summary)
             except Exception as exc:  # noqa: BLE001
                 log.debug("failed to emit finding: %r", exc)
@@ -216,17 +231,67 @@ class Interceptor:
             request_bytes=len(msg.raw),
         )
 
+        # Egress runs on the way out, while the data can still be stopped.
+        # Findings may install a redact or block restriction, so it happens
+        # before the message is forwarded.
+        redacted_args: dict[str, Any] | None = None
+        if self.egress is not None and method == mcp.TOOLS_CALL and tool:
+            arguments = mcp.tool_call_arguments(params)
+            if arguments:
+                findings = self.egress.on_tool_call(self.server_name, tool, arguments)
+                if findings:
+                    self._emit(span, findings)
+                    self._decide(span, findings)
+                    # Re-check: a finding may have just blocked this very call.
+                    if self.policy is not None:
+                        verdict = self.policy.check(self.server_name, tool)
+                        if not verdict.allowed:
+                            span.set_status(Status(StatusCode.ERROR, "blocked on egress"))
+                            span.end()
+                            self._pending.pop(msg.id, None)
+                            self._emit_enforcement(verdict.restriction, method, tool)
+                            return HookResult.block(verdict.message)
+                        redacted_args = self._maybe_redact(span, arguments, tool)
+
         # Instrumentation must not change what the upstream receives. Only
-        # rewrite when our keys are actually present -- an untouched message
-        # stays byte-faithful, which is what the golden tests assert.
-        if traceparent or tracestate:
-            cleaned = mcp.strip_trace_context(params)
-            if cleaned is not params:
+        # rewrite when our keys are actually present, or when redaction
+        # deliberately altered the arguments -- an untouched message stays
+        # byte-faithful, which is what the golden tests assert.
+        needs_rewrite = bool(traceparent or tracestate) or redacted_args is not None
+        if needs_rewrite:
+            new_params = mcp.strip_trace_context(params) if (traceparent or tracestate) else dict(params)
+            if redacted_args is not None:
+                new_params = dict(new_params)
+                new_params["arguments"] = redacted_args
+            if new_params is not params:
                 payload = dict(msg.payload or {})
-                payload["params"] = cleaned
+                payload["params"] = new_params
                 msg.rewrite(payload)
 
         return HookResult.forward()
+
+    def _maybe_redact(self, span, arguments: dict[str, Any], tool: str) -> dict[str, Any] | None:
+        """Apply a standing redact_args restriction, if one is in force."""
+        if self.policy is None or self.egress is None:
+            return None
+        try:
+            from kams.detect.egress import redact
+            from kams.policy.model import Action
+
+            for r in self.policy.restrictions:
+                if r.action is Action.REDACT_ARGS and r.server == self.server_name:
+                    cleaned, count = redact(arguments, self.egress)
+                    if count:
+                        span.add_event(
+                            "kams.redacted",
+                            attributes={sc.KAMS_EGRESS_COUNT: count, sc.KAMS_RULE_NAME: r.rule},
+                        )
+                        log.warning("redacted %d value(s) in %s arguments [%s]", count, tool, r.rule)
+                        return cleaned
+                    return None
+        except Exception as exc:  # noqa: BLE001 - redaction must never break the call
+            log.warning("redaction failed, forwarding unmodified: %r", exc)
+        return None
 
     # ---- server -> client ---------------------------------------------------
 
@@ -270,7 +335,25 @@ class Interceptor:
                             baseline.state if baseline else "first_sighting",
                         )
 
-                elif pending.method == mcp.TOOLS_CALL and self.integrity is not None and pending.tool:
+                elif pending.method == mcp.TOOLS_CALL and pending.tool:
+                    # Context cost: what this result will consume of the model's
+                    # window, attributed to the server that produced it.
+                    if self.cost is not None:
+                        attribution = self.cost.estimate(self.server_name, pending.tool, len(msg.raw))
+                        self.cost.record(self.session_id, attribution)
+                        span.set_attribute(sc.MCP_CONTEXT_COST_TOKENS, attribution.tokens)
+                        # Never publish an estimate as though it were measured.
+                        span.set_attribute(sc.MCP_CONTEXT_COST_ESTIMATED, attribution.estimated)
+                        self._h_cost.record(
+                            attribution.tokens,
+                            {**labels, "estimated": str(attribution.estimated).lower()},
+                        )
+                        spike = self.cost.check_spike(attribution)
+                        if spike:
+                            self._emit(span, spike)
+                            self._decide(span, spike)
+
+                if pending.method == mcp.TOOLS_CALL and self.integrity is not None and pending.tool:
                     # Descriptions are not the only injection surface -- any
                     # server output reaches the model's context.
                     texts = mcp.extract_result_text(msg.result)

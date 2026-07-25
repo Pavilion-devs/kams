@@ -44,6 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     shim.add_argument("--otlp-endpoint", default=None, help="OTLP gRPC endpoint")
     shim.add_argument("--lock", default="kams.lock", help="path to the pinned tool-definition lockfile")
     shim.add_argument("--no-integrity", action="store_true", help="disable the integrity detector")
+    shim.add_argument("--no-egress", action="store_true", help="disable sensitive-data classification")
     shim.add_argument("--policy", default="policy.yaml", help="path to the policy file")
     shim.add_argument("--no-enforce", action="store_true", help="observe only; never block")
     shim.add_argument("--state", default="kams-state.json",
@@ -163,7 +164,18 @@ async def _run_shim(args, upstream: list[str]) -> int:
 
         engine = PolicyEngine(policy, shared=SharedState(args.state))
 
-    interceptor = Interceptor(server_name, integrity=integrity, policy=engine)
+    egress = None
+    if not args.no_egress:
+        from kams.detect.egress import EgressClassifier
+
+        egress = EgressClassifier()
+
+    from kams.detect.cost import ContextCostEstimator
+
+    interceptor = Interceptor(
+        server_name, integrity=integrity, policy=engine,
+        egress=egress, cost=ContextCostEstimator(),
+    )
     relay = StdioRelay(
         upstream,
         on_client_message=interceptor.on_client_message,

@@ -111,6 +111,39 @@ Signals combine with **noisy-OR** (`1 − Π(1 − wᵢsᵢ)`) rather than a wei
 
 Scoring runs over what a change **added**, so a description that always contained a URL does not fire.
 
+### Egress — what is leaving, and to whom
+
+MCP arguments carry your data into third-party code. Kams classifies what crosses
+that boundary: credential shapes (AWS, GitHub, Slack, Anthropic, OpenAI, JWTs,
+private keys), PII, Luhn-checked card numbers, and fields whose *name* implies a
+secret even when the value looks unremarkable — a field called `password` holding
+`hunter2` matches no pattern and is still a credential.
+
+Sensitivity is a property of the **(class, destination) pair**, not the payload.
+Credentials to any unvetted server has no benign reading; email addresses to a CRM
+server is expected. `policy.yaml` expresses that pairing; the detector only reports.
+
+Findings carry class, count, JSON path, and a **salted digest** — never the value.
+The salt is per-installation, so digests correlate locally and mean nothing once
+telemetry leaves the host. A test asserts no finding's serialised form contains any
+fixture secret, or any 16-character fragment of one.
+
+Redaction replaces matched spans with **typed** placeholders
+(`[kams:redacted:aws_key]`) rather than blanking the field, so the model still
+knows what kind of thing was there and does not retry blindly.
+
+### Context cost — measured where possible, honest where not
+
+Tool results consume the model's context window, and nothing today attributes that
+cost to the server responsible. Kams estimates per call, then **reconciles**: when
+an instrumented agent reports a real token delta for a turn, it distributes that
+measurement across the results that entered context and carries a per-server
+correction factor forward. Estimates get progressively less wrong; turn-level
+figures are ground truth.
+
+Every emission carries `mcp.context.cost.estimated`. A cost metric that silently
+mixed measured and estimated values would not be one anyone should trust.
+
 ### Threat model — documented, not invented
 
 | Attack | Detector |
@@ -138,7 +171,7 @@ Everything rests on the agent being unable to tell Kams is there. `tests/golden/
 Messages carry their original bytes and are forwarded unmodified unless a hook explicitly rewrites them. Parsing is for observation only. Re-serialising everything would silently reorder keys and change unicode escaping — invisible when diffing parsed objects, very visible to anything hashing the wire.
 
 ```bash
-uv run pytest        # 62 tests
+uv run pytest        # 128 tests
 ```
 
 The false-positive suite is the load-bearing half. Ordinary tool prose containing "you must", "do not", URLs, and imperatives must stay quiet — and does.
@@ -158,9 +191,9 @@ casting.yaml{,.lock}   Foundry deployment of SigNoz (MCP server enabled)
 policy.yaml            declarative enforcement rules
 kams.lock              pinned tool definitions
 src/kams/
-  transport/           stdio + HTTP adapters — no logic
+  transport/           stdio adapter — no logic (HTTP not implemented)
   protocol/            JSON-RPC framing, MCP shapes, _meta handling
-  detect/              integrity, injection scoring, baselines — pure
+  detect/              integrity, injection, egress, cost — pure
   policy/              parser + evaluator — pure
   telemetry/           spans, metrics, semconv constants
   semconv/mcp.yaml     the upstream-able model file
@@ -172,15 +205,15 @@ tests/golden/          byte-transparency guarantees
 
 ## Status
 
-Working: transparent stdio relay, semconv telemetry into SigNoz, integrity detection with pinning, injection scoring, declarative policy, reflex enforcement, narrated demo.
-
-In progress: SigNoz alert webhook → enforcement (the fleet-scale control loop), dashboards and alerts as versioned code, egress and context-cost detectors.
+**Working, end to end:** transparent stdio relay; semconv telemetry into SigNoz; integrity detection with `kams.lock` pinning; deterministic injection scoring; egress classification with redaction; context-cost attribution; declarative policy; reflex enforcement; the SigNoz alert → webhook → quarantine control loop; dashboards and alerts provisioned as versioned code.
 
 Known limits, stated plainly:
 
-- Enforcement applies to calls issued *after* a finding is processed. MCP permits pipelining, so a burst issued before the `tools/list` response is handled can slip through within a single connection. Standing state in `kamsd` closes this across connections.
-- The LLM judge described in `architecture.md` §3.2 is designed but not yet implemented. It only ever annotates.
-- HTTP transport shares the detector pipeline but has had less exercise than stdio.
+- **stdio transport only.** `architecture.md` describes an HTTP adapter sharing the same detector pipeline — the interceptor is written to be transport-agnostic — but it is **not implemented**. Only stdio is built and exercised.
+- Enforcement applies to calls issued *after* a finding is processed. MCP permits pipelining, so a burst issued before the `tools/list` response is handled can slip through within a single connection. Standing state in `kamsd` closes this across connections, but not within one.
+- The LLM judge described in `architecture.md` §3.2 is designed but not implemented. By design it only ever annotates, so nothing about enforcement depends on it.
+- Context cost is an **estimate** until an instrumented agent reports a measured token delta. Every emission carries `mcp.context.cost.estimated` so the two are never confused, and the estimator calibrates per server once ground truth arrives.
+- The webhook trusts its network position. It has no signature verification, which is fine for a loopback deployment and would not be for an exposed one.
 
 ## AI assistance
 

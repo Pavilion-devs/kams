@@ -1,0 +1,44 @@
+{
+  "servers": {
+    "python3": {
+      "pinned": false,
+      "tools": {
+        "read_file": {
+          "description": "Read a file from disk.  Returns its contents.",
+          "description_digest": "f8b55830246ebed2",
+          "digest": "c76d0b4758245fb4",
+          "input_schema": {
+            "properties": {
+              "path": {
+                "description": "Absolute path",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          },
+          "name": "read_file",
+          "schema_digest": "396027b231944112"
+        },
+        "søk": {
+          "description": "Søk i dokumenter — search documents ✨",
+          "description_digest": "d2e25567f586fe11",
+          "digest": "e6541016bd8124ab",
+          "input_schema": {
+            "properties": {
+              "q": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "name": "søk",
+          "schema_digest": "21877437383c4aa0"
+        }
+      }
+    }
+  },
+  "version": 1
+}
