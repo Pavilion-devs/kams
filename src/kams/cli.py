@@ -50,6 +50,30 @@ def main(argv: list[str] | None = None) -> int:
     shim.add_argument("--state", default="kams-state.json",
                       help="shared enforcement state, written by kamsd and other shims")
 
+    proxy = sub.add_parser(
+        "proxy",
+        help="wrap an MCP server on streamable HTTP",
+        description=(
+            "Reverse-proxy an HTTP MCP server through the same detector pipeline "
+            "the stdio shim uses. Point the agent at this address instead of the "
+            "upstream one."
+        ),
+    )
+    proxy.add_argument("--upstream", required=True,
+                       help="upstream MCP endpoint, e.g. http://localhost:8000/mcp")
+    proxy.add_argument("--server", default=None, help="logical server name")
+    proxy.add_argument("--host", default="127.0.0.1")
+    proxy.add_argument("--port", type=int, default=8900)
+    proxy.add_argument("--path", default="/mcp")
+    proxy.add_argument("--otlp-endpoint", default=None)
+    proxy.add_argument("--lock", default="kams.lock")
+    proxy.add_argument("--policy", default="policy.yaml")
+    proxy.add_argument("--state", default="kams-state.json")
+    proxy.add_argument("--no-integrity", action="store_true")
+    proxy.add_argument("--no-egress", action="store_true")
+    proxy.add_argument("--no-enforce", action="store_true")
+    proxy.add_argument("--log-level", default=os.environ.get("KAMS_LOG_LEVEL", "info"))
+
     pin = sub.add_parser(
         "pin",
         help="promote a server's recorded tool definitions to pinned",
@@ -100,6 +124,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_status(args)
     if args.cmd == "daemon":
         return _run_daemon(args)
+    if args.cmd == "proxy":
+        return _run_proxy(args)
 
     return 1
 
@@ -129,27 +155,29 @@ def _run_daemon(args) -> int:
     return 0
 
 
-async def _run_shim(args, upstream: list[str]) -> int:
-    server_name = args.server or os.path.basename(upstream[0])
+def _build_pipeline(args):
+    """Detectors and policy, shared by both transports.
 
-    if args.no_telemetry:
-        return await StdioRelay(upstream).run()
-
+    Factored out deliberately: a detector wired into stdio but forgotten on HTTP
+    would be a silent hole that no test would notice.
+    """
     from kams.detect.baseline import BaselineStore
+    from kams.detect.cost import ContextCostEstimator
     from kams.detect.integrity import IntegrityDetector
-    from kams.shim.interceptor import Interceptor
-    from kams.telemetry import tracing
 
-    tracing.setup("kams-shim", endpoint=args.otlp_endpoint, extra_resource={"kams.server": server_name})
+    store = integrity = egress = engine = None
 
-    store = None
-    integrity = None
-    if not args.no_integrity:
+    if not getattr(args, "no_integrity", False):
         store = BaselineStore(args.lock)
         integrity = IntegrityDetector(store)
 
-    engine = None
-    if not args.no_enforce:
+    if not getattr(args, "no_egress", False):
+        from kams.detect.egress import EgressClassifier
+
+        egress = EgressClassifier()
+
+    if not getattr(args, "no_enforce", False):
+        from kams.daemon.state import SharedState
         from kams.policy.engine import PolicyEngine
         from kams.policy.model import Policy
 
@@ -160,21 +188,67 @@ async def _run_shim(args, upstream: list[str]) -> int:
             # observe-only and say so loudly (principle 1).
             print(f"kams: policy {args.policy} unreadable ({exc}); observing only", file=sys.stderr)
             policy = Policy.permissive()
-        from kams.daemon.state import SharedState
-
         engine = PolicyEngine(policy, shared=SharedState(args.state))
 
-    egress = None
-    if not args.no_egress:
-        from kams.detect.egress import EgressClassifier
+    return store, integrity, egress, engine, ContextCostEstimator()
 
-        egress = EgressClassifier()
 
-    from kams.detect.cost import ContextCostEstimator
+def _name_from_url(url: str) -> str:
+    from urllib.parse import urlparse
+
+    return (urlparse(url).hostname or "upstream").replace(".", "-")
+
+
+def _run_proxy(args) -> int:
+    from kams.shim.interceptor import Interceptor
+    from kams.telemetry import tracing
+    from kams.transport.http import HttpRelay, serve
+
+    server_name = args.server or _name_from_url(args.upstream)
+    tracing.setup("kams-shim", endpoint=args.otlp_endpoint, extra_resource={"kams.server": server_name})
+
+    store, integrity, egress, engine, cost = _build_pipeline(args)
+    interceptor = Interceptor(
+        server_name, integrity=integrity, policy=engine, egress=egress,
+        cost=cost, transport="http",
+    )
+    relay = HttpRelay(
+        args.upstream,
+        on_client_message=interceptor.on_client_message,
+        on_server_message=interceptor.on_server_message,
+        path=args.path,
+    )
+    print(f"kams proxy  http://{args.host}:{args.port}{args.path}  ->  {args.upstream}  [{server_name}]")
+    try:
+        serve(relay, host=args.host, port=args.port)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        interceptor.close()
+        if store is not None:
+            try:
+                store.save()
+            except OSError as exc:
+                print(f"kams: could not write {args.lock}: {exc}", file=sys.stderr)
+        tracing.shutdown()
+    return 0
+
+
+async def _run_shim(args, upstream: list[str]) -> int:
+    server_name = args.server or os.path.basename(upstream[0])
+
+    if args.no_telemetry:
+        return await StdioRelay(upstream).run()
+
+    from kams.shim.interceptor import Interceptor
+    from kams.telemetry import tracing
+
+    tracing.setup("kams-shim", endpoint=args.otlp_endpoint, extra_resource={"kams.server": server_name})
+
+    store, integrity, egress, engine, cost = _build_pipeline(args)
 
     interceptor = Interceptor(
-        server_name, integrity=integrity, policy=engine,
-        egress=egress, cost=ContextCostEstimator(),
+        server_name, integrity=integrity, policy=engine, egress=egress, cost=cost
     )
     relay = StdioRelay(
         upstream,

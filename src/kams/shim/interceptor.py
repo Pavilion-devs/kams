@@ -59,6 +59,7 @@ class Interceptor:
         policy: Any | None = None,
         egress: Any | None = None,
         cost: Any | None = None,
+        transport: str = "stdio",
     ) -> None:
         self.server_name = server_name
         self.session_id = session_id or uuid.uuid4().hex[:16]
@@ -66,6 +67,10 @@ class Interceptor:
         self.policy = policy
         self.egress = egress
         self.cost = cost
+        # Set by whichever adapter constructed us. Hardcoding this meant
+        # HTTP traffic was reported as stdio, which is worse than omitting
+        # the attribute entirely.
+        self.transport = transport
         self._tracer = tracing.tracer("kams.shim")
         self._pending: dict[str | int, _Pending] = {}
 
@@ -209,7 +214,7 @@ class Interceptor:
                 sc.MCP_METHOD_NAME: method,
                 sc.MCP_SERVER_NAME: self.server_name,
                 sc.MCP_SESSION_ID: self.session_id,
-                sc.MCP_TRANSPORT: "stdio",
+                sc.MCP_TRANSPORT: self.transport,
                 sc.MCP_REQUEST_ID: str(msg.id),
                 sc.MCP_REQUEST_SIZE: len(msg.raw),
                 # Records the propagation gap instead of hiding it: an orphaned
@@ -330,6 +335,10 @@ class Interceptor:
                         findings = self.integrity.on_tools_list(self.server_name, tools)
                         self._emit(span, findings)
                         self._decide(span, findings)
+                        # Persist now, not at shutdown. A long-running proxy
+                        # would otherwise hold a learned baseline in memory
+                        # indefinitely and lose it on a crash.
+                        self._persist_baseline()
                         span.set_attribute(
                             sc.KAMS_BASELINE_STATE,
                             baseline.state if baseline else "first_sighting",
@@ -375,6 +384,15 @@ class Interceptor:
         return HookResult.forward()
 
     # ---- lifecycle ----------------------------------------------------------
+
+    def _persist_baseline(self) -> None:
+        store = getattr(self.integrity, "store", None)
+        if store is None:
+            return
+        try:
+            store.save()
+        except OSError as exc:
+            log.debug("could not persist baseline: %r", exc)
 
     def close(self) -> None:
         """Close spans whose responses never arrived.

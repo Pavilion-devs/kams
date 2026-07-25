@@ -74,9 +74,17 @@ Point an existing agent at it by wrapping the server command:
 }
 ```
 
+Or reverse-proxy an HTTP MCP server — same detectors, same policy:
+
+```bash
+kams proxy --upstream http://localhost:8000/mcp --server signoz-mcp --port 8900
+# then point the agent at http://localhost:8900/mcp
+```
+
 ```bash
 kams status              # what's recorded, and its trust state
 kams pin filesystem      # promote to pinned — drift is now a finding
+kams daemon              # control plane: SigNoz alerts -> enforcement
 ```
 
 ## How the detection works
@@ -166,12 +174,14 @@ Full design: [`architecture.md`](architecture.md).
 
 ## Transparency is tested, not asserted
 
-Everything rests on the agent being unable to tell Kams is there. `tests/golden/` runs an identical transcript with and without the proxy and asserts the two stdout streams are **byte-identical** — covering non-alphabetical key order, emoji, a 200KB payload past the default stream limit, error `data`, and unknown methods.
+Everything rests on the agent being unable to tell Kams is there. `tests/golden/` runs an identical transcript with and without the proxy and asserts the streams are **byte-identical** — covering non-alphabetical key order, emoji, a 200KB payload past the default stream limit, error `data`, and unknown methods.
+
+HTTP widens that guarantee to status codes and headers, since an HTTP client observes all three. `Mcp-Session-Id` is load-bearing and must survive; hop-by-hop headers must not. And SSE responses must stay *streamed* — a proxy that buffered a stream to inspect it would turn incremental delivery into batched delivery, invisible in a body comparison and obvious to an agent rendering tokens live. That case is asserted against the generator directly, because `httpx.ASGITransport` buffers and would pass either way.
 
 Messages carry their original bytes and are forwarded unmodified unless a hook explicitly rewrites them. Parsing is for observation only. Re-serialising everything would silently reorder keys and change unicode escaping — invisible when diffing parsed objects, very visible to anything hashing the wire.
 
 ```bash
-uv run pytest        # 128 tests
+uv run pytest        # 143 tests
 ```
 
 The false-positive suite is the load-bearing half. Ordinary tool prose containing "you must", "do not", URLs, and imperatives must stay quiet — and does.
@@ -191,7 +201,7 @@ casting.yaml{,.lock}   Foundry deployment of SigNoz (MCP server enabled)
 policy.yaml            declarative enforcement rules
 kams.lock              pinned tool definitions
 src/kams/
-  transport/           stdio adapter — no logic (HTTP not implemented)
+  transport/           stdio + streamable-HTTP adapters — no logic
   protocol/            JSON-RPC framing, MCP shapes, _meta handling
   detect/              integrity, injection, egress, cost — pure
   policy/              parser + evaluator — pure
@@ -209,7 +219,6 @@ tests/golden/          byte-transparency guarantees
 
 Known limits, stated plainly:
 
-- **stdio transport only.** `architecture.md` describes an HTTP adapter sharing the same detector pipeline — the interceptor is written to be transport-agnostic — but it is **not implemented**. Only stdio is built and exercised.
 - Enforcement applies to calls issued *after* a finding is processed. MCP permits pipelining, so a burst issued before the `tools/list` response is handled can slip through within a single connection. Standing state in `kamsd` closes this across connections, but not within one.
 - The LLM judge described in `architecture.md` §3.2 is designed but not implemented. By design it only ever annotates, so nothing about enforcement depends on it.
 - Context cost is an **estimate** until an instrumented agent reports a measured token delta. Every emission carries `mcp.context.cost.estimated` so the two are never confused, and the estimator calibrates per server once ground truth arrives.

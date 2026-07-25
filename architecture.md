@@ -69,7 +69,7 @@ flowchart TB
 
 The shim caches policy state in-process and refreshes on a short interval plus on push. A `kamsd` outage therefore degrades to "enforcement is stale" rather than "the agent stops working" — principle 1.
 
-**HTTP transport** would use the same shim as a reverse proxy instead of a subprocess wrapper — same detector pipeline, different I/O adapter, since the transport is deliberately kept out of the brain. **Not implemented.** Only stdio exists today; this section describes the intended shape, not shipped code.
+**HTTP transport** uses the same interceptor as a reverse proxy instead of a subprocess wrapper — same detector pipeline, same policy, different I/O adapter, since the transport is deliberately kept out of the brain. Both adapters build their pipeline through one shared factory, so a detector cannot be wired into one and silently missing from the other.
 
 ---
 
@@ -362,7 +362,7 @@ kams/
 ├── policy.yaml                        # declarative rules
 ├── kams.lock                          # pinned tool-definition baselines
 ├── src/kams/
-│   ├── transport/     # stdio.py — I/O adapter, no logic (http.py NOT built)
+│   ├── transport/     # stdio.py, http.py — I/O adapters, no logic
 │   ├── protocol/      # JSON-RPC framing, MCP message types, _meta handling
 │   ├── shim/          # data plane: relay + sync detectors + spans
 │   ├── daemon/        # control plane: policy state, webhook, enrichment
