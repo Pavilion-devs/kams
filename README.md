@@ -15,7 +15,7 @@ Track 01, AI & Agent Observability.
 
 ## Live
 
-- 🎥 **Demo video** — https://usekams.xyz/
+- 🎥 **Demo video** — https://youtu.be/2A5t79Ryufc
 - 🌐 **Live demo** — https://usekams.xyz/
 - 📖 **Docs** — https://docs.usekams.xyz/
 - 🗺️ **Architecture** — https://docs.usekams.xyz/architecture
@@ -163,7 +163,7 @@ redacted, limited, blocked, or quarantined explicitly.
 - 🌐 Live demo — https://usekams.xyz/
 - 🗺️ Interactive architecture — https://docs.usekams.xyz/architecture
 - 📖 Docs — https://docs.usekams.xyz/
-- 🎥 Demo video — https://usekams.xyz/
+- 🎥 Demo video — https://youtu.be/2A5t79Ryufc
 
 ## Requirements
 

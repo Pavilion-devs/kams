@@ -15,10 +15,10 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://kams.dev"),
+  metadataBase: new URL("https://www.usekams.xyz"),
   title: {
     default: "Kams — SigNoz-native observability and containment for MCP",
-    template: "%s · Kams Docs",
+    template: "%s · Kams",
   },
   description:
     "Kams sits transparently between an agent and its MCP servers: it emits OpenTelemetry MCP traces, metrics and correlated logs to SigNoz, pins every tool definition, detects drift, injection, sensitive egress and context cost, then turns a SigNoz alert into a TTL-bound quarantine before the next tool call.",
