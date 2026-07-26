@@ -51,7 +51,7 @@ export default function Home() {
 
           <div className="mt-10 flex w-full max-w-md flex-col gap-3 sm:flex-row sm:justify-center">
             <a
-              href="https://youtu.be/Jzf-HQRsdmg"
+              href="https://youtu.be/D_3tuQwp2r0"
               target="_blank"
               rel="noreferrer"
               className="inline-flex min-h-12 flex-1 items-center justify-center rounded-full bg-zinc-950 px-6 text-sm font-semibold text-white shadow-[0_12px_30px_rgba(24,24,27,0.16)] transition-transform hover:-translate-y-0.5"
